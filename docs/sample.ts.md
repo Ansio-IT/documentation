@@ -1,4 +1,4 @@
-# Code Documentation for sample.ts
+=# Code Documentation for sample.ts
 
 ## Document Information
 - **Generated On**: 2025-07-24T07:15:42.069Z
