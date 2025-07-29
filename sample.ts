@@ -1,5 +1,5 @@
 function greet(name: string): string {
-  return `Hello Ansio IT, ${name}!`;
+  return `Hello Ansio, ${name}!`;
 }
 
 const message = greet("Ansio IT");
