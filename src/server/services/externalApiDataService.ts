@@ -66,6 +66,26 @@ class ExternalApiDataService {
     }
     return data ? data.map(fromSnakeCase) : [];
   }
+
+  async getLatestBrightDataSyncTimestamp(): Promise<string | null> {
+    const supabase = this.getSupabaseClient();
+    const { data, error } = await supabase
+      .from('external_api_data')
+      .select('created_at')
+      .eq('provider', 'BrightData')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') { // No rows found
+        return null;
+      }
+      console.error("Error fetching latest sync timestamp:", error);
+      throw error;
+    }
+    return data?.created_at || null;
+  }
 }
 
 export const externalApiDataService = new ExternalApiDataService();

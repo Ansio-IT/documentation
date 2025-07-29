@@ -1,6 +1,5 @@
-
 import { type SupabaseClient } from '@supabase/supabase-js';
-import type { ProductListing, ProductListingData, MarketSetting, ManagerSetting } from '@/lib/types';
+import type { ProductListing, MarketSetting, ManagerSetting } from '@/lib/types';
 import { cookies } from 'next/headers';
 import { createClient } from '@/lib/supabase/server';
 
@@ -12,21 +11,30 @@ const fromSnakeCase = (dbListing: any): ProductListing => {
     productId: dbListing.product_id,
     marketId: dbListing.market_id,
     managerId: dbListing.manager_id,
-    data: dbListing.data || {},
+    asin: dbListing.asin,
+    currentPrice: dbListing.current_price,
+    listPrice: dbListing.list_price,
+    discount: dbListing.discount,
+    dealType: dbListing.deal_type,
+    categoryRanks: dbListing.category_ranks,
+    dispatchedFrom: dbListing.dispatched_from,
+    soldBy: dbListing.sold_by,
+    deliveryInfo: dbListing.delivery_info,
+    brand: dbListing.brand,
+    productName: dbListing.product_name,
     isCompetitor: dbListing.is_competitor,
     createdOn: dbListing.created_on,
     updatedOn: dbListing.updated_on,
+    data: dbListing.data,
   };
-
-  // Ensure that the data field gets populated with joined market and manager info
-  // if the joins are present in the Supabase query.
-  if (dbListing.markets) { // dbListing.markets is the object { market_name: '...', currency_symbol: '...' }
-    listing.data.marketName = dbListing.markets.market_name; // Access snake_case
-    listing.data.currencySymbol = dbListing.markets.currency_symbol; // Access snake_case
-    listing.data.marketDomainIdentifier = dbListing.markets.domain_identifier; // Access snake_case
+  // Add market/manager info directly to listing if needed
+  if (dbListing.markets) {
+    listing.marketName = dbListing.markets.market_name;
+    listing.currencySymbol = dbListing.markets.currency_symbol;
+    listing.marketDomainIdentifier = dbListing.markets.domain_identifier;
   }
-  if (dbListing.managers) { // dbListing.managers is the object { name: '...' }
-    listing.data.managerName = dbListing.managers.name; // Access snake_case (assuming 'name' is the column)
+  if (dbListing.managers) {
+    listing.managerName = dbListing.managers.name;
   }
   return listing;
 };
@@ -40,9 +48,17 @@ const toSnakeCase = (listing: Partial<ProductListing>): any => {
   if (listing.productId !== undefined) result.product_id = listing.productId;
   if (listing.marketId !== undefined) result.market_id = listing.marketId;
   if (listing.managerId !== undefined) result.manager_id = listing.managerId;
-  if (listing.data !== undefined) result.data = listing.data;
+  if (listing.asin !== undefined) result.asin = listing.asin;
+  if (listing.currentPrice !== undefined) result.current_price = listing.currentPrice;
+  if (listing.listPrice !== undefined) result.list_price = listing.listPrice;
+  if (listing.discount !== undefined) result.discount = listing.discount;
+  if (listing.dealType !== undefined) result.deal_type = listing.dealType;
+  if (listing.categoryRanks !== undefined) result.category_ranks = listing.categoryRanks;
+  if (listing.dispatchedFrom !== undefined) result.dispatched_from = listing.dispatchedFrom;
+  if (listing.soldBy !== undefined) result.sold_by = listing.soldBy;
+  if (listing.deliveryInfo !== undefined) result.delivery_info = listing.deliveryInfo;
+  // REMOVE data
   if (listing.isCompetitor !== undefined) result.is_competitor = listing.isCompetitor;
-  // created_on and updated_on are handled by Supabase defaults/triggers or explicitly in update methods
   return result;
 };
 
@@ -75,7 +91,6 @@ class ProductListingService {
     if (!listingToInsert.manager_id) {
         throw new Error("Manager ID is required for creating a product listing.");
     }
-    // DB defaults will handle created_on and updated_on
     delete listingToInsert.created_on;
     delete listingToInsert.updated_on;
 
@@ -109,37 +124,7 @@ class ProductListingService {
   }
 
 
-  async updateProductListingData(listingId: string, newData: Partial<ProductListingData>): Promise<ProductListing> {
-    const supabase = this.getSupabaseClient();
-
-    const { data: existingListing, error: fetchError } = await supabase
-        .from('product_listings')
-        .select('data')
-        .eq('id', listingId)
-        .single();
-
-    if (fetchError || !existingListing) {
-        console.error(`Error fetching existing listing data for ${listingId}:`, fetchError);
-        throw new Error(`Failed to fetch existing listing for update: ${fetchError?.message || 'Not found'}`);
-    }
-
-    const mergedData = { ...existingListing.data, ...newData };
-
-    const { data: updatedDbListing, error: updateError } = await supabase
-      .from('product_listings')
-      .update({ data: mergedData, updated_on: new Date().toISOString() }) 
-      .eq('id', listingId)
-      .select('*, markets (market_name, currency_symbol, domain_identifier), managers (name)')
-      .single();
-
-    if (updateError || !updatedDbListing) {
-      console.error(`Error updating product listing data for ${listingId}:`, updateError);
-      throw new Error(`Failed to update product listing data: ${updateError?.message}`);
-    }
-    return fromSnakeCase(updatedDbListing);
-  }
-
-  async updateProductListing(listingId: string, listingUpdates: Partial<Omit<ProductListing, 'id' | 'createdOn' | 'updatedOn' | 'data'>>): Promise<ProductListing> {
+  async updateProductListing(listingId: string, listingUpdates: Partial<Omit<ProductListing, 'id' | 'createdOn' | 'updatedOn'>>): Promise<ProductListing> {
     const supabase = this.getSupabaseClient();
     const updatesToApply = toSnakeCase(listingUpdates);
     updatesToApply.updated_on = new Date().toISOString(); 
@@ -158,88 +143,6 @@ class ProductListingService {
     }
     return fromSnakeCase(updatedDbListing);
   }
-
-
-  async upsertProductListingByAsinAndMarket(
-    asin: string,
-    marketId: string,
-    listingWebhookData: ProductListingData,
-    ourProductIdForContext?: string | null,
-    managerIdForContext?: string | null, 
-    isCompetitorFlag: boolean = false
-  ): Promise<ProductListing> {
-    const supabase = this.getSupabaseClient();
-
-    const { data: existingListings, error: findError } = await supabase
-      .from('product_listings')
-      .select('id, data, product_id, is_competitor, manager_id')
-      .eq('data->>asinCode', asin)
-      .eq('market_id', marketId);
-
-    if (findError) {
-      console.error(`Error finding listing for ASIN ${asin}, Market ${marketId}:`, findError);
-      throw findError;
-    }
-
-    let targetListing = existingListings?.find(l => l.is_competitor === isCompetitorFlag) || (existingListings ? existingListings[0] : null);
-
-
-    if (targetListing) {
-      const currentData = targetListing.data as ProductListingData || {};
-      const updatedDataForJsonb = { ...currentData, ...listingWebhookData };
-      const updatesForListing: any = { data: updatedDataForJsonb, updated_on: new Date().toISOString() }; 
-
-      if (managerIdForContext && !targetListing.is_competitor && targetListing.manager_id !== managerIdForContext) {
-          updatesForListing.manager_id = managerIdForContext;
-      }
-
-
-      const { data: updatedDbListing, error: updateError } = await supabase
-        .from('product_listings')
-        .update(updatesForListing)
-        .eq('id', targetListing.id)
-        .select('*, markets (market_name, currency_symbol, domain_identifier), managers (name)')
-        .single();
-
-      if (updateError || !updatedDbListing) {
-        console.error(`Error updating product listing ${targetListing.id}:`, updateError);
-        throw new Error(`Failed to update product listing: ${updateError?.message}`);
-      }
-      console.log(`Product listing ${targetListing.id} (ASIN: ${asin}) updated.`);
-      return fromSnakeCase(updatedDbListing);
-    } else {
-      if (!ourProductIdForContext) {
-          console.warn(`Attempted to create new listing for ASIN ${asin} in market ${marketId} without a parent product_id. Skipping creation.`);
-          throw new Error(`Cannot create listing for ASIN ${asin} without a linking product_id.`);
-      }
-      if (!managerIdForContext) {
-          console.error(`Attempted to create new listing for ASIN ${asin} in market ${marketId} without a manager_id. This is required.`);
-          throw new Error(`Cannot create listing for ASIN ${asin} without a manager_id. Manager ID is required.`);
-      }
-
-      const newListingPayload: any = { 
-        product_id: ourProductIdForContext,
-        market_id: marketId,
-        manager_id: managerIdForContext,
-        data: listingWebhookData,
-        is_competitor: isCompetitorFlag,
-      };
-
-      const { data: newDbListing, error: insertError } = await supabase
-        .from('product_listings')
-        .insert(newListingPayload)
-        .select('*, markets (market_name, currency_symbol, domain_identifier), managers (name)')
-        .single();
-
-      if (insertError || !newDbListing) {
-        console.error(`Error creating new product listing for ASIN ${asin}:`, insertError);
-        throw new Error(`Failed to create new product listing: ${insertError?.message}`);
-      }
-      console.log(`New product listing created for ASIN ${asin} (ID: ${newDbListing.id}).`);
-      return fromSnakeCase(newDbListing);
-    }
-  }
-
 
   async getProductListingsByProductId(productId: string): Promise<ProductListing[]> {
     const supabase = this.getSupabaseClient();
@@ -292,7 +195,7 @@ class ProductListingService {
     let query = supabase
       .from('product_listings')
       .select('*, markets (market_name, currency_symbol, domain_identifier), managers (name)')
-      .eq('data->>asinCode', asin)
+      .eq('asin', asin)
       .eq('market_id', marketId);
 
     if (productIdForContext !== undefined) {
@@ -311,6 +214,74 @@ class ProductListingService {
     }
     return data ? fromSnakeCase(data) : null;
   }
+
+  async findOrCreateProductListing(
+    listingPayload: Partial<Omit<ProductListing, 'id' | 'createdOn' | 'updatedOn'>>
+  ): Promise<ProductListing> {
+    const supabase = this.getSupabaseClient();
+
+    if (!listingPayload.productId || !listingPayload.marketId || !listingPayload.asin) {
+        throw new Error("productId, marketId, and asin are required to find or create a listing.");
+    }
+
+    const { data: existingListing, error: findError } = await supabase
+        .from('product_listings')
+        .select('*')
+        .eq('product_id', listingPayload.productId)
+        .eq('market_id', listingPayload.marketId)
+        .eq('asin', listingPayload.asin)
+        .eq('is_competitor', listingPayload.isCompetitor === true) // Default to false if not provided
+        .maybeSingle();
+
+    if (findError && findError.code !== 'PGRST116') {
+        console.error('Error finding product listing:', findError);
+        throw findError;
+    }
+
+    if (existingListing) {
+        const updates = toSnakeCase(listingPayload);
+        delete updates.id;
+        delete updates.product_id;
+        delete updates.market_id;
+        delete updates.asin;
+
+        const { data: updatedDbListing, error: updateError } = await supabase
+            .from('product_listings')
+            .update(updates)
+            .eq('id', existingListing.id)
+            .select('*, markets (market_name, currency_symbol, domain_identifier), managers (name)')
+            .single();
+        
+        if (updateError || !updatedDbListing) {
+            console.error(`Error updating product listing ${existingListing.id}:`, updateError);
+            throw updateError;
+        }
+        return fromSnakeCase(updatedDbListing);
+    } else {
+        const newListingData = {
+            ...listingPayload,
+            isCompetitor: listingPayload.isCompetitor === true,
+        };
+        return this.addProductListing(newListingData as Omit<ProductListing, 'id' | 'createdOn' | 'updatedOn'>);
+    }
+  }
 }
 
 export const productListingService = new ProductListingService();
+
+// In your ProductListing type import, add the optional fields if not present
+// type ProductListing = { ...existing fields... } & {
+//   marketName?: string;
+//   currencySymbol?: string;
+//   marketDomainIdentifier?: string;
+//   managerName?: string;
+// };
+// If you control the type definition, update it in src/lib/types.ts. For now, extend here for type safety:
+declare module '@/lib/types' {
+  interface ProductListing {
+    marketName?: string;
+    currencySymbol?: string;
+    marketDomainIdentifier?: string;
+    managerName?: string;
+  }
+}

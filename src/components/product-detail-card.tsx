@@ -126,7 +126,10 @@ export function ProductDetailCard({ product, activeMarketSettings, managerName }
               <div>
                 <span className="font-medium text-xs text-muted-foreground flex items-center mb-0.5"><DollarSign className="h-3.5 w-3.5 mr-1" />Price</span>
                 <p className="text-lg font-semibold text-accent">
-                  {currencySymbol}{(product.price ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {product.price !== null && product.price !== undefined
+                    ? `${currencySymbol}${product.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                    : 'N/A'
+                  }
                 </p>
               </div>
               <div>

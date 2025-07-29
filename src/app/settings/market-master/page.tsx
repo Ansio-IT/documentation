@@ -6,7 +6,7 @@ import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import type { MarketSetting } from '@/lib/types';
-import { fetchAllMarketSettings, addMarketSettingAction, updateMarketSettingAction } from '@/app/actions';
+import { fetchAllMarketSettings, addMarketSettingAction, updateMarketSettingAction } from '@/app/actions/market-settings.actions';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

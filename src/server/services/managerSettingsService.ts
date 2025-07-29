@@ -78,6 +78,22 @@ class ManagerSettingsService {
     return data ? fromSnakeCase(data) : null;
   }
 
+  async getManagerByName(name: string): Promise<ManagerSetting | null> {
+    if (!name || name.trim() === '') return null;
+    const supabase = this.getSupabaseClient();
+    const { data, error } = await supabase
+      .from('managers')
+      .select('*')
+      .eq('name', name)
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') {
+      console.error(`Error fetching manager by name "${name}":`, error);
+      throw error;
+    }
+    return data ? fromSnakeCase(data) : null;
+  }
+
   async addManagerSetting(settingData: Omit<ManagerSetting, 'id' | 'createdOn' | 'modifiedOn'>): Promise<ManagerSetting> {
     const supabase = this.getSupabaseClient();
     const settingToInsert = toSnakeCase(settingData);

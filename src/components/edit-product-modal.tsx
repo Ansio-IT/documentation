@@ -5,7 +5,8 @@ import React, { useState, useEffect } from 'react';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import type { Product, MarketSetting, ManagerSetting, ProductListingData } from '@/lib/types';
+import type { Product, MarketSetting, ManagerSetting, ProductListingData, Keyword } from '@/lib/types';
+import { fetchAllKeywordsAction } from '@/app/actions/keyword.actions';
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,30 +29,29 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ScrollArea } from './ui/scroll-area';
+import { SearchableMultiSelectKeyword } from '@/components/ui/searchable-multi-select-keyword';
 
+// Schema for fields considered "core" to the product, potentially not all editable in this modal
 const productCoreEditSchema = z.object({
   name: z.string().min(1, "Product Name is required").nullable().optional(),
   barcode: z.string().min(1, "Barcode/Primary Identifier is required").optional(),
   productCode: z.string().min(1, "Product Code (SKU) is required").optional(),
   portfolioId: z.string().optional().nullable(),
   properties: z.string().optional().nullable().refine(val => {
-    if (!val || val.trim() === "") return true; // Allow empty string
+    if (!val || val.trim() === "") return true; 
     try { JSON.parse(val); return true; } catch { return false; }
   }, { message: "Properties must be valid JSON or empty" }),
   imageUrl: z.string().url("Must be a valid URL for core image").optional().or(z.literal('')).nullable(),
   description: z.string().max(1000, "Description cannot exceed 1000 characters").optional().nullable(),
   isActive: z.boolean().optional(),
+  keywords: z.array(z.string()).optional(),
 });
 
+// Schema for fields specific to the primary listing being edited
 const primaryListingEditSchema = z.object({
+  marketId: z.string({ required_error: "Market for this listing is required."}).min(1, "Market for this listing is required."),
   managerId: z.string({ required_error: "Manager for this listing is required."}).min(1, "Manager for this listing is required."),
-  marketId: z.string().optional(),
   asinCode: z.string().min(1, "ASIN for this market is required").optional().nullable(),
-  price: z.preprocess(
-    (val) => (val === "" || val === null || val === undefined) ? undefined : parseFloat(String(val)),
-    z.number({ invalid_type_error: "Price must be a number" }).positive("Price must be positive").optional()
-  ).nullable(),
-  listingImageUrl: z.string().url("Must be a valid URL for listing image").optional().or(z.literal('')).nullable(),
 });
 
 const combinedEditSchema = productCoreEditSchema.merge(primaryListingEditSchema);
@@ -63,7 +63,7 @@ interface EditProductModalProps {
   product: Product | null;
   onUpdateProduct: (
     productId: string,
-    productCoreData: Partial<Omit<Product, 'id' | 'createdOn' | 'modifiedOn' | 'competitorListings' | 'primaryListingManagerName' | 'market' | 'price' | 'currency' | 'url' | 'asinCode' | 'rootBsCategory' | 'rootBsRank' | 'bsCategory' | 'bsRank' | 'subcategoryRanks' | 'attentionNeeded' | 'dataAiHint' | 'lastUpdated' | 'product_listings'>>,
+    productCoreData: Partial<Omit<Product, 'id' | 'createdOn' | 'modifiedOn' | 'competitorListings' | 'primaryListingManagerName' | 'market' | 'price' | 'currency' | 'url' | 'asinCode' | 'rootBsCategory' | 'rootBsRank' | 'bsCategory' | 'bsRank' | 'subcategoryRanks' | 'attentionNeeded' | 'dataAiHint' | 'lastUpdated' | 'product_listings' | 'associatedProducts' | 'localWarehouseLeadTime' | 'reorderLeadTime' >>,
     primaryListingUpdates?: { managerId?: string; data?: Partial<ProductListingData> },
     marketIdForListing?: string
   ) => Promise<boolean>;
@@ -73,16 +73,16 @@ interface EditProductModalProps {
 
 export function EditProductModal({ isOpen, onOpenChange, product, onUpdateProduct, markets, managers }: EditProductModalProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [availableKeywords, setAvailableKeywords] = useState<Keyword[]>([]);
   const {
     control,
     handleSubmit,
     reset,
-    setValue,
-    formState: { errors, isDirty, isValid } // Ensured errors is destructured
+    formState: { errors, isDirty, isValid } 
   } = useForm<EditProductFormData>({
     resolver: zodResolver(combinedEditSchema),
-    mode: 'onChange', // To enable isDirty and isValid
-    defaultValues: {
+    mode: 'onChange', 
+    defaultValues: { 
         name: '',
         barcode: '',
         productCode: '',
@@ -94,88 +94,106 @@ export function EditProductModal({ isOpen, onOpenChange, product, onUpdateProduc
         managerId: undefined,
         marketId: undefined,
         asinCode: '',
-        price: undefined,
-        listingImageUrl: ''
+        keywords: [],
       }
   });
 
   useEffect(() => {
-    if (isOpen && product) {
-      reset();
-      setValue('name', product.name || '');
-      setValue('barcode', product.barcode || '');
-      setValue('productCode', product.productCode || '');
-      setValue('portfolioId', product.portfolioId || '');
-      setValue('properties', product.properties ? JSON.stringify(product.properties, null, 2) : '');
-      setValue('imageUrl', product.imageUrl || '');
-      setValue('description', product.description || '');
-      setValue('isActive', product.isActive !== undefined ? product.isActive : true);
-
-      const primaryMarketListing = product.product_listings?.find(l => !l.is_competitor);
-      setValue('marketId', primaryMarketListing?.market_id || undefined); // Should be marketId from listing
-      setValue('managerId', primaryMarketListing?.manager_id || undefined);
-      setValue('asinCode', primaryMarketListing?.data?.asinCode || '');
-      setValue('price', primaryMarketListing?.data?.price ?? undefined);
-      setValue('listingImageUrl', primaryMarketListing?.data?.imageUrl || '');
+    if (isOpen) {
+        const loadKeywords = async () => {
+            const keywords = await fetchAllKeywordsAction();
+            setAvailableKeywords(keywords);
+        };
+        loadKeywords();
     }
-  }, [isOpen, product, reset, setValue, markets, managers]);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen && product) {
+      const primaryMarketListing = product.product_listings?.find(l => !l.isCompetitor && l.marketId === product.marketId) || product.product_listings?.find(l => !l.isCompetitor);
+
+      reset({
+        name: product.name || '',
+        barcode: product.barcode || '',
+        productCode: product.productCode || '',
+        portfolioId: product.portfolioId || '',
+        properties: product.properties ? JSON.stringify(product.properties, null, 2) : '',
+        imageUrl: product.imageUrl || '', 
+        description: product.description || '',
+        isActive: product.isActive !== undefined ? product.isActive : true,
+        
+        marketId: product.marketId || primaryMarketListing?.marketId || undefined, 
+        managerId: product.managerId || primaryMarketListing?.managerId || undefined,
+        asinCode: product.asinCode || primaryMarketListing?.asin || '',
+        keywords: product.keywords || [],
+      });
+    }
+  }, [isOpen, product, reset]);
 
   const onSubmit = async (data: EditProductFormData) => {
     if (!product) return;
     setIsSubmitting(true);
 
-    let parsedProperties: Record<string, any> | null = null;
-    if (data.properties && data.properties.trim() !== "") {
-        try { parsedProperties = JSON.parse(data.properties); } catch (e) { setIsSubmitting(false); console.error("Invalid JSON for properties", e); return; }
+    const productCoreDataToUpdate: Partial<Omit<Product, 'id' | 'createdOn' | 'modifiedOn' | 'competitorListings' | 'primaryListingManagerName' | 'market' | 'price' | 'currency' | 'url' | 'asinCode' | 'rootBsCategory' | 'rootBsRank' | 'bsCategory' | 'bsRank' | 'subcategoryRanks' | 'attentionNeeded' | 'dataAiHint' | 'lastUpdated' | 'product_listings' | 'associatedProducts' | 'localWarehouseLeadTime' | 'reorderLeadTime' >> = {};
+    
+    // Check which core fields have changed
+    if (data.name !== product.name) productCoreDataToUpdate.name = data.name;
+    if (data.description !== product.description) productCoreDataToUpdate.description = data.description;
+    if (data.imageUrl !== product.imageUrl) productCoreDataToUpdate.imageUrl = data.imageUrl;
+    
+    // Check if keywords have changed
+    const originalKeywords = (product.keywords || []).sort();
+    const newKeywords = (data.keywords || []).sort();
+    if (JSON.stringify(originalKeywords) !== JSON.stringify(newKeywords)) {
+      productCoreDataToUpdate.keywords = data.keywords;
     }
-
-    const coreProductUpdates: Partial<Omit<Product, 'id' | 'createdOn' | 'modifiedOn' | 'competitorListings' | 'primaryListingManagerName' | 'market' | 'price' | 'currency' | 'url' | 'asinCode' | 'rootBsCategory' | 'rootBsRank' | 'bsCategory' | 'bsRank' | 'subcategoryRanks' | 'attentionNeeded' | 'dataAiHint' | 'lastUpdated' | 'product_listings' >> = {};
-
-    if (data.name !== product.name) coreProductUpdates.name = data.name;
-    if (data.barcode !== product.barcode) coreProductUpdates.barcode = data.barcode;
-    if (data.productCode !== product.productCode) coreProductUpdates.productCode = data.productCode;
-    const newPortfolioId = data.portfolioId === '' ? null : data.portfolioId;
-    if (newPortfolioId !== product.portfolioId) coreProductUpdates.portfolioId = newPortfolioId;
-    const currentPropertiesString = product.properties ? JSON.stringify(product.properties, null, 2) : '';
-    if (data.properties !== currentPropertiesString) coreProductUpdates.properties = parsedProperties;
-    if (data.imageUrl !== product.imageUrl) coreProductUpdates.imageUrl = data.imageUrl || null;
-    if (data.description !== product.description) coreProductUpdates.description = data.description || null;
-    if (data.isActive !== product.isActive) coreProductUpdates.isActive = data.isActive;
-
+    
     const primaryListingUpdatesPayload: { managerId?: string; data?: Partial<ProductListingData> } = {};
     let hasListingSpecificUpdates = false;
+    
+    const originalPrimaryListing = product.product_listings?.find(l => !l.isCompetitor && l.marketId === product.marketId) || product.product_listings?.find(l => !l.isCompetitor);
 
-    const originalPrimaryListing = product.product_listings?.find(l => !l.is_competitor);
-    const marketIdForListingUpdate = originalPrimaryListing?.market_id;
-
-    if (data.managerId && data.managerId !== originalPrimaryListing?.manager_id) {
+    if (data.managerId && data.managerId !== (originalPrimaryListing?.managerId || product.managerId)) {
         primaryListingUpdatesPayload.managerId = data.managerId;
         hasListingSpecificUpdates = true;
     }
-
+    
     const listingSpecificDataUpdates: Partial<ProductListingData> = {};
-    if (data.asinCode !== undefined && data.asinCode !== (originalPrimaryListing?.data?.asinCode || '')) listingSpecificDataUpdates.asinCode = data.asinCode;
-    if (data.price !== undefined && data.price !== (originalPrimaryListing?.data?.price ?? undefined)) listingSpecificDataUpdates.price = data.price;
-    if (data.listingImageUrl !== undefined && data.listingImageUrl !== (originalPrimaryListing?.data?.imageUrl || '')) listingSpecificDataUpdates.imageUrl = data.listingImageUrl || undefined;
+    if (data.asinCode !== (originalPrimaryListing?.asin || product.asinCode)) {
+      listingSpecificDataUpdates.asin = data.asinCode || null;
+      hasListingSpecificUpdates = true;
+    }
+    if (data.name && data.name !== (originalPrimaryListing?.productName || product.name)) {
+      listingSpecificDataUpdates.title = data.name;
+      hasListingSpecificUpdates = true;
+    }
 
     if (Object.keys(listingSpecificDataUpdates).length > 0) {
         primaryListingUpdatesPayload.data = listingSpecificDataUpdates;
         hasListingSpecificUpdates = true;
     }
 
+    const marketIdForListingToUpdate = data.marketId;
+    if (!marketIdForListingToUpdate) {
+        console.error("Market ID is missing for listing update.");
+        setIsSubmitting(false);
+        return;
+    }
+    
     const success = await onUpdateProduct(
         product.id,
-        coreProductUpdates,
+        productCoreDataToUpdate,
         hasListingSpecificUpdates ? primaryListingUpdatesPayload : undefined,
-        marketIdForListingUpdate
+        marketIdForListingToUpdate
     );
+
     setIsSubmitting(false);
     if (success) {
       onOpenChange(false);
     }
   };
 
-  const formId = "edit-product-form";
+  const formId = "update-product-form"; 
 
   if (!product) {
     return null;
@@ -183,86 +201,26 @@ export function EditProductModal({ isOpen, onOpenChange, product, onUpdateProduc
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[650px] bg-card shadow-xl rounded-lg flex flex-col max-h-[90vh]">
+      <DialogContent className="sm:max-w-lg bg-card shadow-xl rounded-lg flex flex-col max-h-[90vh] overflow-hidden">
         <DialogHeader>
-          <DialogTitle>Edit Product: {product.name || product.barcode}</DialogTitle>
+          <DialogTitle>Update Product: {product.name || product.productCode}</DialogTitle>
           <DialogDescription>
-            Update core product details and its primary market listing information.
+            Update primary market listing information.
           </DialogDescription>
         </DialogHeader>
-        <ScrollArea className="flex-1 min-h-0">
+        <ScrollArea className="flex-1 min-h-0 w-full max-w-[800px] mx-auto my-2 border rounded-md">
           <form onSubmit={handleSubmit(onSubmit)} id={formId}>
-            <div className="p-4 grid gap-4">
-              <h3 className="text-lg font-semibold mb-1 border-b pb-2">Core Product Details</h3>
+            <div className="p-6 grid gap-4">
+              <h3 className="text-lg font-semibold mb-1 mt-0 border-b pb-2">Primary Market Listing Details</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                    <Label htmlFor="editName">Product Name</Label>
-                    <Controller name="name" control={control} render={({ field }) => <Input id="editName" {...field} value={field.value ?? ''} />} />
-                    {errors.name && <p className="text-sm text-destructive mt-1">{errors.name.message}</p>}
-                </div>
-                <div>
-                    <Label htmlFor="editProductCode">Product Code (SKU)</Label>
-                    <Controller name="productCode" control={control} render={({ field }) => <Input id="editProductCode" {...field} value={field.value ?? ''} />} />
-                    {errors.productCode && <p className="text-sm text-destructive mt-1">{errors.productCode.message}</p>}
-                </div>
-              </div>
-              <div>
-                <Label htmlFor="editBarcode">Barcode (Primary Identifier)</Label>
-                <Controller name="barcode" control={control} render={({ field }) => <Input id="editBarcode" {...field} value={field.value ?? ''} />} />
-                {errors.barcode && <p className="text-sm text-destructive mt-1">{errors.barcode.message}</p>}
-              </div>
-              <div>
-                <Label htmlFor="editPortfolioId">Portfolio ID (Optional)</Label>
-                <Controller name="portfolioId" control={control} render={({ field }) => <Input id="editPortfolioId" {...field} value={field.value ?? ''} placeholder="e.g., Portfolio UUID" />} />
-                {errors.portfolioId && <p className="text-sm text-destructive mt-1">{errors.portfolioId.message}</p>}
-              </div>
-              <div>
-                <Label htmlFor="editImageUrl">Core Product Image URL</Label>
-                <Controller name="imageUrl" control={control} render={({ field }) => <Input id="editImageUrl" {...field} value={field.value ?? ''} placeholder="https://example.com/core-image.png" />} />
-                {errors.imageUrl && <p className="text-sm text-destructive mt-1">{errors.imageUrl.message}</p>}
-              </div>
-              <div>
-                <Label htmlFor="editProperties">Properties (JSON format, Optional)</Label>
-                <Controller name="properties" control={control} render={({ field }) => <Textarea id="editProperties" {...field} value={field.value ?? ''} placeholder='e.g., {"color": "blue", "size": "large"}' rows={3} />} />
-                {errors.properties && <p className="text-sm text-destructive mt-1">{errors.properties.message}</p>}
-              </div>
-              <div>
-                <Label htmlFor="editDescription">Core Description</Label>
-                <Controller name="description" control={control} render={({ field }) => <Textarea id="editDescription" {...field} value={field.value ?? ''} rows={3} />} />
-                {errors.description && <p className="text-sm text-destructive mt-1">{errors.description.message}</p>}
-              </div>
-              <div className="flex items-center space-x-2 mt-2">
-                <Controller name="isActive" control={control} render={({ field }) => ( <Switch id="editIsActive" checked={field.value} onCheckedChange={field.onChange} /> )} />
-                <Label htmlFor="editIsActive" className="cursor-pointer">Product is Active</Label>
-                {errors.isActive && <p className="text-sm text-destructive mt-1">{errors.isActive.message}</p>}
-              </div>
-
-              <h3 className="text-lg font-semibold mb-1 mt-6 border-b pb-2">Primary Market Listing Details</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                    <Label htmlFor="editManagerId_listing">Manager for this Listing</Label>
-                    <Controller name="managerId" control={control}
-                    render={({ field }) => (
-                        <Select onValueChange={field.onChange} value={field.value || ''}>
-                        <SelectTrigger id="editManagerId_listing"><SelectValue placeholder="Select manager" /></SelectTrigger>
-                        <SelectContent>
-                          {(managers || []).filter(Boolean).map(manager => (
-                            <SelectItem key={manager.id} value={manager.id}>{manager.name}</SelectItem>
-                          ))}
-                        </SelectContent>
-                        </Select>
-                    )}
-                    />
-                    {errors.managerId && <p className="text-sm text-destructive mt-1">{errors.managerId.message}</p>}
-                </div>
-                <div>
-                    <Label htmlFor="editMarketId_listing">Market (Primary Listing)</Label>
+                    <Label htmlFor="updateMarketId_listing">Market (Primary Listing)</Label>
                      <Controller
                         name="marketId"
                         control={control}
                         render={({ field }) => (
-                            <Select onValueChange={field.onChange} value={field.value || ''} disabled>
-                                <SelectTrigger id="editMarketId_listing">
+                            <Select onValueChange={field.onChange} value={field.value || ''}>
+                                <SelectTrigger id="updateMarketId_listing">
                                     <SelectValue placeholder="Select market" />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -275,25 +233,48 @@ export function EditProductModal({ isOpen, onOpenChange, product, onUpdateProduc
                             </Select>
                         )}
                     />
-                    <p className="text-xs text-muted-foreground mt-1">Market for the primary listing cannot be changed here.</p>
                      {errors.marketId && <p className="text-sm text-destructive mt-1">{errors.marketId.message}</p>}
+                </div>
+                <div>
+                    <Label htmlFor="updateManagerId_listing">Manager for this Listing</Label>
+                    <Controller name="managerId" control={control}
+                    render={({ field }) => (
+                        <Select onValueChange={field.onChange} value={field.value || ''}>
+                        <SelectTrigger id="updateManagerId_listing"><SelectValue placeholder="Select manager" /></SelectTrigger>
+                        <SelectContent>
+                          {(managers || []).filter(Boolean).map(manager => (
+                            <SelectItem key={manager.id} value={manager.id}>{manager.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                        </Select>
+                    )}
+                    />
+                    {errors.managerId && <p className="text-sm text-destructive mt-1">{errors.managerId.message}</p>}
                 </div>
               </div>
               <div>
-                    <Label htmlFor="editAsinCode_listing">ASIN for this Market</Label>
-                    <Controller name="asinCode" control={control} render={({ field }) => <Input id="editAsinCode_listing" {...field} value={field.value ?? ''} />} />
-                    {errors.asinCode && <p className="text-sm text-destructive mt-1">{errors.asinCode.message}</p>}
+                <Label htmlFor="updateAsinCode_listing">ASIN for this Market</Label>
+                <Controller name="asinCode" control={control} render={({ field }) => <Input id="updateAsinCode_listing" {...field} value={field.value ?? ''} placeholder="e.g., B08N5HR77W" />} />
+                {errors.asinCode && <p className="text-sm text-destructive mt-1">{errors.asinCode.message}</p>}
               </div>
-              <div>
-                    <Label htmlFor="editPrice_listing">Price for this Market</Label>
-                    <Controller name="price" control={control} render={({ field }) => <Input id="editPrice_listing" type="number" step="0.01" {...field} value={field.value ?? ''} />} />
-                    {errors.price && <p className="text-sm text-destructive mt-1">{errors.price.message}</p>}
+
+               <div className="mt-4">
+                <Label htmlFor="keywords">Keywords for this Product</Label>
+                 <Controller
+                    name="keywords"
+                    control={control}
+                    render={({ field }) => (
+                        <SearchableMultiSelectKeyword
+                            value={field.value || []}
+                            onChange={field.onChange}
+                            availableKeywords={availableKeywords}
+                            placeholder="Select product keywords..."
+                        />
+                    )}
+                />
+                {errors.keywords && <p className="text-sm text-destructive mt-1">{errors.keywords.message}</p>}
               </div>
-              <div>
-                    <Label htmlFor="editListingImageUrl_listing">Image URL for this Listing</Label>
-                    <Controller name="listingImageUrl" control={control} render={({ field }) => <Input id="editListingImageUrl_listing" {...field} value={field.value ?? ''} />} />
-                    {errors.listingImageUrl && <p className="text-sm text-destructive mt-1">{errors.listingImageUrl.message}</p>}
-              </div>
+              
             </div>
           </form>
         </ScrollArea>
@@ -302,7 +283,7 @@ export function EditProductModal({ isOpen, onOpenChange, product, onUpdateProduc
             Cancel
           </Button>
           <Button type="submit" form={formId} disabled={isSubmitting || !isDirty || !isValid} className="bg-primary hover:bg-primary/90 text-primary-foreground">
-            {isSubmitting ? "Saving..." : "Save Changes"}
+            {isSubmitting ? "Updating..." : "Update Listing Details"}
           </Button>
         </DialogFooter>
       </DialogContent>

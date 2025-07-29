@@ -6,7 +6,8 @@ import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import type { OwnerSetting } from '@/lib/types';
-import { fetchAllOwnerSettings, addOwnerSettingAction, updateOwnerSettingAction } from '@/app/actions';
+import { addOwnerSettingAction, updateOwnerSettingAction } from '@/app/actions';
+import { fetchAllManagerSettings } from '@/app/actions/manager-settings.actions';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,7 +56,7 @@ export default function OwnerMasterPage() {
   const loadOwnerSettings = useCallback(async () => {
     setIsLoading(true);
     try {
-      const settings = await fetchAllOwnerSettings();
+      const settings = await fetchAllManagerSettings();
       setOwnerSettings(settings);
     } catch (error) {
       toast({ title: "Error", description: "Failed to load owner settings.", variant: "destructive" });

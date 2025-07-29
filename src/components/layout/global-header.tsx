@@ -4,6 +4,7 @@
 import React from 'react';
 import { AppSidebar } from './sidebar';
 import Link from 'next/link';
+// Removed ChevronRight import as it's no longer used
 
 export function GlobalHeader() {
   return (
@@ -15,6 +16,7 @@ export function GlobalHeader() {
             <Link href="/" className="text-2xl font-bold text-primary hover:text-primary/90">
               Retail Sales Portal
             </Link>
+            {/* Removed the breadcrumb-like structure for Advertisement Details */}
           </div>
           {/* Add any other truly global elements here, e.g., user profile, notifications icon */}
         </div>

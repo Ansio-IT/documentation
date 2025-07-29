@@ -1,11 +1,10 @@
 
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import * as XLSX from 'xlsx';
-import type { MarketingDataEntry, FetchMarketingDataParams, DateRange as CustomDateRange } from '@/lib/types';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import Link from 'next/link';
+import type { MarketingDataEntry, FetchMarketingDataParams, DateRange as CustomDateRange, ProductListingUploadSummary, ProductListingUploadError } from '@/lib/types';
 import {
-  processAndStoreMarketingData,
   fetchMarketingData,
   fetchDistinctMarketingOwners,
   fetchDistinctMarketingPortfolios
@@ -31,7 +30,7 @@ import {
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useToast } from "@/hooks/use-toast";
-import { UploadCloud, RefreshCw, Search, CalendarIcon, XIcon } from 'lucide-react';
+import { UploadCloud, RefreshCw, Search, CalendarIcon, XIcon, FileSpreadsheet, ArrowLeft, Download, AlertTriangle } from 'lucide-react';
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import {
   useReactTable,
@@ -46,25 +45,41 @@ import {
 } from '@tanstack/react-table';
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
-import { format, parseISO, isValid as isValidDateFn, subDays, startOfDay, endOfDay, parse as parseDateFns } from 'date-fns';
+import { format, parseISO, isValid as isValidDateFn, subDays, startOfDay, endOfDay } from 'date-fns';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { MarketingUploadModal } from '@/components/marketing-upload-modal';
+import {
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogContent,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { downloadErrorCSV } from '@/lib/uploadErrorUtils';
+
 
 const formatDateForDisplay = (dateString: string | null | undefined): string => {
   if (!dateString) return 'N/A';
   try {
-    let date = parseISO(dateString);
+    const date = parseISO(dateString); // Directly parse ISO string (YYYY-MM-DD)
     if (isValidDateFn(date)) return format(date, 'MMM do, yyyy');
-    date = new Date(dateString);
-    if (isValidDateFn(date)) return format(date, 'MMM do, yyyy');
+  } catch (e) { /* ignore if parseISO fails, fallback below */ }
+  
+  // Fallback for potentially non-ISO string dates (though DB should store consistently)
+  try {
+      const date = new Date(dateString);
+      if (isValidDateFn(date)) return format(date, 'MMM do, yyyy');
   } catch (e) { /* ignore */ }
-  return dateString;
+
+  return dateString; // Return original string if all parsing fails
 };
+
 
 const formatNumberForDisplay = (value: number | string | null | undefined): string => {
   if (value === null || value === undefined || String(value).trim() === '' || isNaN(Number(value))) return 'N/A';
   const num = Number(value);
-  // Always show 2 decimal places for all numbers as per request
   return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
@@ -75,7 +90,8 @@ const formatCurrency = (value: number | null | undefined, symbol = '£'): string
 
 const formatPercentage = (value: number | null | undefined): string => {
   if (value === null || value === undefined || isNaN(Number(value))) return 'N/A%';
-  return `${(Number(value) * 100).toFixed(2)}%`; // Ensures 2 decimal places
+  // Value is already a percentage, e.g., 13.11 for 13.11%
+  return `${Number(value).toFixed(2)}%`;
 };
 
 const numericFields: (keyof MarketingDataEntry)[] = [
@@ -86,63 +102,93 @@ const numericFields: (keyof MarketingDataEntry)[] = [
   'vcStock', 'totalStock', 'moh'
 ];
 
-const headerMapping: { [key: string]: keyof MarketingDataEntry } = {
-  'DATE': 'date', 'ASIN': 'asin', 'Product Code': 'productCode', 'Product Description': 'productDescription',
-  'Person': 'person', 'Portfolio': 'portfolio', 'Sub Portfolio': 'subPortfolio',
-  'Total Qty Sold (SC + VC)': 'totalQtySold', 'Total Adv Units Sold': 'totalAdvUnitsSold',
-  'Total Revenue Ex VAT (CP)': 'totalRevenueExVatCp', 'Total Sales Revenue Ex VAT (SP)': 'totalSalesRevenueExVatSp',
-  'Total Adv Spend': 'totalAdvSpend', 'Total Adv Sales': 'totalAdvSales',
-  'per unit Adv Spend on Total Qty Sold': 'perUnitAdvSpendOnTotalQtySold',
-  'per unit Adv Spend on Adv Qty Sold': 'perUnitAdvSpendOnAdvQtySold',
-  'Marketing%': 'marketingPercent', 'ACOS%': 'acosPercent',
-  'Zero Adv Profit SC': 'zeroAdvProfitSc', 'Zero Adv Profit VC': 'zeroAdvProfitVc',
-  'Total (SC + VC) Zero Adv Gross Profit': 'totalZeroAdvGrossProfit', 'Total GP': 'totalGp', 'GP%': 'gpPercent',
-  'FBA Stock': 'fbaStock', 'BWW Actual Stock': 'bwwActualStock', 'VC Stock': 'vcStock',
-  'Total Stock': 'totalStock', 'MOH': 'moh', 'Adv Marketplace': 'advMarketplace',
+const toSnakeCaseForSort = (clientSortId: string): string => {
+  const mappings: Record<string, string> = {
+    productCode: 'product_code', productDescription: 'product_description', subPortfolio: 'sub_portfolio',
+    totalQtySold: 'total_qty_sold', totalAdvUnitsSold: 'total_adv_units_sold', totalRevenueExVatCp: 'total_revenue_ex_vat_cp',
+    totalSalesRevenueExVatSp: 'total_sales_revenue_ex_vat_sp', totalAdvSpend: 'total_adv_spend', totalAdvSales: 'total_adv_sales',
+    perUnitAdvSpendOnTotalQtySold: 'per_unit_adv_spend_on_total_qty_sold', perUnitAdvSpendOnAdvQtySold: 'per_unit_adv_spend_on_adv_qty_sold',
+    marketingPercent: 'marketing_percent', acosPercent: 'acos_percent', zeroAdvProfitSc: 'zero_adv_profit_sc',
+    zeroAdvProfitVc: 'zero_adv_profit_vc', totalZeroAdvGrossProfit: 'total_zero_adv_gross_profit', totalGp: 'total_gp',
+    gpPercent: 'gp_percent', fbaStock: 'fba_stock', bwwActualStock: 'bww_actual_stock', vcStock: 'vc_stock',
+    totalStock: 'total_stock', advMarketplace: 'adv_marketplace', createdAt: 'created_at'
+    // date, asin, person, portfolio, moh are same in camel and snake
+  };
+  return mappings[clientSortId] || clientSortId;
 };
 
-const parseExcelDate = (excelDate: any): string | null => {
-  if (excelDate === null || excelDate === undefined) return null;
-  if (typeof excelDate === 'number') {
-    if (excelDate < 1 || excelDate > 2958465) return null;
-    const date = XLSX.SSF.parse_date_code(excelDate);
-    if (date && date.y && date.m && date.d && date.y >= 1900 && date.y < 3000) {
-      return `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`;
-    }
-  } else if (typeof excelDate === 'string') {
-    const commonFormats = [
-      'MM/dd/yyyy', 'dd/MM/yyyy', 'yyyy-MM-dd', 'MM-dd-yyyy', 'dd-MM-yyyy',
-      'M/d/yy', 'd/M/yy', 'yy-M-d', 'M-d-yy', 'd-M-yy',
-      'yyyy/MM/dd', 'dd.MM.yyyy', 'MM.dd.yyyy'
-    ];
-    for (const fmt of commonFormats) {
-      try {
-        const parsed = parseDateFns(excelDate, fmt, new Date());
-        if (isValidDateFn(parsed) && parsed.getFullYear() >= 1900 && parsed.getFullYear() < 3000) {
-          return format(parsed, 'yyyy-MM-dd');
-        }
-      } catch { /* ignore */ }
-    }
-    try {
-      const d = new Date(excelDate);
-      if (isValidDateFn(d) && d.getFullYear() >= 1900 && d.getFullYear() < 3000) {
-        return d.toISOString().split('T')[0];
-      }
-    } catch {/* ignore */}
-  }
-  return null;
-};
 
 const columnHelper = createColumnHelper<MarketingDataEntry>();
 
+const getAmazonBaseUrl = (marketplace?: string | null): string => {
+  // Simplified: always return .co.uk for this context or make it configurable
+  return 'https://www.amazon.co.uk';
+};
+
+const formatMultiLineHeader = (text: string): JSX.Element => {
+  const words = text.split(' ');
+  if (words.length > 2) {
+    let line1 = words.slice(0, 2).join(' ');
+    let line2 = words.slice(2).join(' ');
+
+    if (text === 'Total Qty Sold (SC + VC)') { line1 = 'Total Qty'; line2 = 'Sold (SC + VC)';}
+    else if (text === 'Total Adv Units Sold') { line1 = 'Total Adv'; line2 = 'Units Sold'; }
+    else if (text === 'Total Revenue Ex VAT (CP)') { line1 = 'Total Revenue'; line2 = 'Ex VAT (CP)'; }
+    else if (text === 'Total Sales Revenue Ex VAT (SP)') { line1 = 'Total Sales'; line2 = 'Revenue Ex VAT (SP)'; }
+    else if (text === 'Total Adv Spend') { line1 = 'Total Adv'; line2 = 'Spend'; }
+    else if (text === 'Total Adv Sales') { line1 = 'Total Adv'; line2 = 'Sales'; }
+    else if (text === 'per unit Adv Spend on Total Qty Sold') { line1 = 'per unit Adv Spend'; line2 = 'on Total Qty Sold'; }
+    else if (text === 'per unit Adv Spend on Adv Qty Sold') { line1 = 'per unit Adv Spend'; line2 = 'on Adv Qty Sold'; }
+    else if (text === 'Zero Adv Profit SC') { line1 = 'Zero Adv'; line2 = 'Profit SC'; }
+    else if (text === 'Zero Adv Profit VC') { line1 = 'Zero Adv'; line2 = 'Profit VC'; }
+    else if (text === 'Total (SC + VC) Zero Adv Gross Profit') { line1 = 'Total (SC + VC)'; line2 = 'Zero Adv Gross Profit'; }
+    else if (text === 'BWW Actual Stock') { line1 = 'BWW Actual'; line2 = 'Stock'; }
+    
+    return <>{line1}<br />{line2}</>;
+  }
+  return <>{text}</>;
+};
+
+
 const initialColumnsDefinition: ColumnDef<MarketingDataEntry, any>[] = [
   { accessorKey: 'date', header: 'DATE', size: 90, cell: info => formatDateForDisplay(info.getValue()), enableSorting: true },
-  { accessorKey: 'asin', header: 'ASIN', size: 100, cell: info => <span className="block truncate" title={String(info.getValue() ?? 'N/A')}>{info.getValue() ?? 'N/A'}</span>, enableSorting: true },
-  { accessorKey: 'productCode', header: 'Product Code', size: 90, cell: info => <span className="block truncate" title={String(info.getValue() ?? 'N/A')}>{info.getValue() ?? 'N/A'}</span>, enableSorting: true },
+  {
+    accessorKey: 'asin',
+    header: 'ASIN',
+    size: 100,
+    cell: info => {
+      const asinValue = info.getValue();
+      if (!asinValue) return <span className="block truncate" title="N/A">N/A</span>;
+      const marketplace = info.row.original.advMarketplace;
+      const baseUrl = getAmazonBaseUrl(marketplace);
+      const amazonUrl = `${baseUrl}/dp/${asinValue}`;
+      return (
+        <a
+          href={amazonUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block truncate text-primary hover:underline"
+          title={`View ${asinValue} on Amazon UK`}
+        >
+          {asinValue}
+        </a>
+      );
+    },
+    enableSorting: true
+  },
+  { accessorKey: 'productCode', header: 'Product Code', size: 90, cell: info => {
+      const productCodeValue = info.getValue();
+      if (!productCodeValue) return <span className="block truncate" title="N/A">N/A</span>;
+      return (
+        <Link href={`/settings/advertisement-details/product/${productCodeValue}`} className="block truncate text-primary hover:underline" title={`View details for ${productCodeValue}`}>
+          {productCodeValue}
+        </Link>
+      );
+    }, enableSorting: true },
   {
     accessorKey: 'productDescription',
     header: 'Product Description',
-    size: 200,
+    size: 150,
     cell: info => {
       const strVal = String(info.getValue() ?? '');
       const truncatedVal = strVal.length > 25 ? strVal.substring(0, 25) + "..." : strVal;
@@ -153,29 +199,31 @@ const initialColumnsDefinition: ColumnDef<MarketingDataEntry, any>[] = [
   { accessorKey: 'person', header: 'Person', size: 80, cell: info => <span className="block truncate" title={String(info.getValue() ?? 'N/A')}>{info.getValue() ?? 'N/A'}</span>, enableSorting: true },
   { accessorKey: 'portfolio', header: 'Portfolio', size: 80, cell: info => <span className="block truncate" title={String(info.getValue() ?? 'N/A')}>{info.getValue() ?? 'N/A'}</span>, enableSorting: true },
   { accessorKey: 'subPortfolio', header: 'Sub Portfolio', size: 80, cell: info => <span className="block truncate" title={String(info.getValue() ?? 'N/A')}>{info.getValue() ?? 'N/A'}</span>, enableSorting: true },
-  { accessorKey: 'totalQtySold', header: 'Total Qty Sold (SC + VC)', size: 100, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
-  { accessorKey: 'totalAdvUnitsSold', header: 'Total Adv Units Sold', size: 80, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
+  { accessorKey: 'totalQtySold', header: () => formatMultiLineHeader('Total Qty Sold (SC + VC)'), size: 100, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
+  { accessorKey: 'totalAdvUnitsSold', header: () => formatMultiLineHeader('Total Adv Units Sold'), size: 80, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
   {
     accessorKey: 'totalRevenueExVatCp',
     header: ({ table }) => {
       const sum = table.getFilteredRowModel().rows.reduce((acc, row) => acc + (Number(row.original.totalRevenueExVatCp) || 0), 0);
-      return (<div className="text-right"><div className="font-medium">Total Revenue Ex VAT (CP)</div><div className="text-xs font-semibold text-primary">{formatCurrency(sum)}</div></div>);
+      return (<div className="text-right"><div className="font-medium">{formatMultiLineHeader('Total Revenue Ex VAT (CP)')}</div><div className="text-xs font-semibold text-primary">{formatCurrency(sum)}</div></div>);
     },
-    size: 110, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true
+    size: 100, 
+    cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true
   },
   {
     accessorKey: 'totalSalesRevenueExVatSp',
     header: ({ table }) => {
       const sum = table.getFilteredRowModel().rows.reduce((acc, row) => acc + (Number(row.original.totalSalesRevenueExVatSp) || 0), 0);
-      return (<div className="text-right"><div className="font-medium">Total Sales Revenue Ex VAT (SP)</div><div className="text-xs font-semibold text-primary">{formatCurrency(sum)}</div></div>);
+      return (<div className="text-right"><div className="font-medium">{formatMultiLineHeader('Total Sales Revenue Ex VAT (SP)')}</div><div className="text-xs font-semibold text-primary">{formatCurrency(sum)}</div></div>);
     },
-    size: 120, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true
+    size: 100, 
+    cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true
   },
   {
     accessorKey: 'totalAdvSpend',
     header: ({ table }) => {
       const sum = table.getFilteredRowModel().rows.reduce((acc, row) => acc + (Number(row.original.totalAdvSpend) || 0), 0);
-      return (<div className="text-right"><div className="font-medium">Total Adv Spend</div><div className="text-xs font-semibold text-primary">{formatCurrency(sum)}</div></div>);
+      return (<div className="text-right"><div className="font-medium">{formatMultiLineHeader('Total Adv Spend')}</div><div className="text-xs font-semibold text-primary">{formatCurrency(sum)}</div></div>);
     },
     size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true
   },
@@ -183,19 +231,19 @@ const initialColumnsDefinition: ColumnDef<MarketingDataEntry, any>[] = [
     accessorKey: 'totalAdvSales',
     header: ({ table }) => {
       const sum = table.getFilteredRowModel().rows.reduce((acc, row) => acc + (Number(row.original.totalAdvSales) || 0), 0);
-      return (<div className="text-right"><div className="font-medium">Total Adv Sales</div><div className="text-xs font-semibold text-primary">{formatCurrency(sum)}</div></div>);
+      return (<div className="text-right"><div className="font-medium">{formatMultiLineHeader('Total Adv Sales')}</div><div className="text-xs font-semibold text-primary">{formatCurrency(sum)}</div></div>);
     },
     size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true
   },
-  { accessorKey: 'perUnitAdvSpendOnTotalQtySold', header: 'per unit Adv Spend on Total Qty Sold', size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
-  { accessorKey: 'perUnitAdvSpendOnAdvQtySold', header: 'per unit Adv Spend on Adv Qty Sold', size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
+  { accessorKey: 'perUnitAdvSpendOnTotalQtySold', header: () => formatMultiLineHeader('per unit Adv Spend on Total Qty Sold'), size: 90, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
+  { accessorKey: 'perUnitAdvSpendOnAdvQtySold', header: () => formatMultiLineHeader('per unit Adv Spend on Adv Qty Sold'), size: 90, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
   {
     accessorKey: 'marketingPercent',
     header: ({ table }) => {
       const rows = table.getFilteredRowModel().rows;
       const totalAdvSpend = rows.reduce((sum, row) => sum + (Number(row.original.totalAdvSpend) || 0), 0);
       const totalSalesRevenue = rows.reduce((sum, row) => sum + (Number(row.original.totalSalesRevenueExVatSp) || 0), 0);
-      const percentage = totalSalesRevenue !== 0 ? totalAdvSpend / totalSalesRevenue : 0;
+      const percentage = totalSalesRevenue !== 0 ? (totalAdvSpend / totalSalesRevenue) * 100 : 0;
       return (<div className="text-right"><div className="font-medium">Marketing%</div><div className="text-xs font-semibold text-primary">{formatPercentage(percentage)}</div></div>);
     },
     size: 80, cell: info => <span className="block text-right">{formatPercentage(info.getValue())}</span>, enableSorting: true
@@ -206,14 +254,14 @@ const initialColumnsDefinition: ColumnDef<MarketingDataEntry, any>[] = [
       const rows = table.getFilteredRowModel().rows;
       const totalAdvSpend = rows.reduce((sum, row) => sum + (Number(row.original.totalAdvSpend) || 0), 0);
       const totalAdvSales = rows.reduce((sum, row) => sum + (Number(row.original.totalAdvSales) || 0), 0);
-      const percentage = totalAdvSales !== 0 ? totalAdvSpend / totalAdvSales : 0;
+      const percentage = totalAdvSales !== 0 ? (totalAdvSpend / totalAdvSales) * 100 : 0;
       return (<div className="text-right"><div className="font-medium">ACOS%</div><div className="text-xs font-semibold text-primary">{formatPercentage(percentage)}</div></div>);
     },
     size: 80, cell: info => <span className="block text-right">{formatPercentage(info.getValue())}</span>, enableSorting: true
   },
-  { accessorKey: 'zeroAdvProfitSc', header: 'Zero Adv Profit SC', size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
-  { accessorKey: 'zeroAdvProfitVc', header: 'Zero Adv Profit VC', size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
-  { accessorKey: 'totalZeroAdvGrossProfit', header: 'Total (SC + VC) Zero Adv Gross Profit', size: 110, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
+  { accessorKey: 'zeroAdvProfitSc', header: () => formatMultiLineHeader('Zero Adv Profit SC'), size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
+  { accessorKey: 'zeroAdvProfitVc', header: () => formatMultiLineHeader('Zero Adv Profit VC'), size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
+  { accessorKey: 'totalZeroAdvGrossProfit', header: () => formatMultiLineHeader('Total (SC + VC) Zero Adv Gross Profit'), size: 100, cell: info => <span className="block text-right">{formatCurrency(info.getValue())}</span>, enableSorting: true },
   {
     accessorKey: 'totalGp',
     header: ({ table }) => {
@@ -228,32 +276,37 @@ const initialColumnsDefinition: ColumnDef<MarketingDataEntry, any>[] = [
       const rows = table.getFilteredRowModel().rows;
       const totalGp = rows.reduce((sum, row) => sum + (Number(row.original.totalGp) || 0), 0);
       const totalRevenue = rows.reduce((sum, row) => sum + (Number(row.original.totalRevenueExVatCp) || 0), 0);
-      const percentage = totalRevenue !== 0 ? totalGp / totalRevenue : 0;
+      const percentage = totalRevenue !== 0 ? (totalGp / totalRevenue) * 100 : 0;
       return (<div className="text-right"><div className="font-medium">GP%</div><div className="text-xs font-semibold text-primary">{formatPercentage(percentage)}</div></div>);
     },
     size: 80, cell: info => <span className="block text-right">{formatPercentage(info.getValue())}</span>, enableSorting: true
   },
   { accessorKey: 'fbaStock', header: 'FBA Stock', size: 70, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
-  { accessorKey: 'bwwActualStock', header: 'BWW Actual Stock', size: 70, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
+  { accessorKey: 'bwwActualStock', header: () => formatMultiLineHeader('BWW Actual Stock'), size: 70, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
   { accessorKey: 'vcStock', header: 'VC Stock', size: 70, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
   { accessorKey: 'totalStock', header: 'Total Stock', size: 70, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
   { accessorKey: 'moh', header: 'MOH', size: 70, cell: info => <span className="block text-right">{formatNumberForDisplay(info.getValue())}</span>, enableSorting: true },
-  { accessorKey: 'advMarketplace', header: 'Adv Marketplace', size: 100, cell: info => <span className="block truncate" title={String(info.getValue() ?? 'N/A')}>{info.getValue() ?? 'N/A'}</span>, enableSorting: true },
+  { accessorKey: 'advMarketplace', header: 'Adv Marketplace', size: 90, cell: info => <span className="block truncate" title={String(info.getValue() ?? 'N/A')}>{info.getValue() ?? 'N/A'}</span>, enableSorting: true },
 ].map(colDef => {
     const key = (colDef as any).accessorKey as keyof MarketingDataEntry;
-    if (numericFields.includes(key) && typeof colDef.header === 'string') {
+    if (numericFields.includes(key) && typeof colDef.header === 'string' && !colDef.header.includes('<br />') && typeof colDef.header !== 'function') {
         return {
             ...colDef,
-            header: () => <div className="text-right w-full">{colDef.header}</div>,
+            header: () => <div className="text-right w-full">{formatMultiLineHeader(colDef.header as string)}</div>,
+            enableSorting: true,
         };
     }
-    if (typeof colDef.header === 'string' && (colDef.header.includes('%') || colDef.header.toLowerCase().includes('price') || colDef.header.toLowerCase().includes('revenue') || colDef.header.toLowerCase().includes('spend') || colDef.header.toLowerCase().includes('profit') || colDef.header.toLowerCase().includes('gp'))) {
+     if (typeof colDef.header === 'string' && !colDef.header.includes('<br />') && typeof colDef.header !== 'function' && (colDef.header.includes('%') || colDef.header.toLowerCase().includes('price') || colDef.header.toLowerCase().includes('revenue') || colDef.header.toLowerCase().includes('spend') || colDef.header.toLowerCase().includes('profit') || colDef.header.toLowerCase().includes('gp') || colDef.header.toLowerCase().includes('qty') || colDef.header.toLowerCase().includes('units') || colDef.header.toLowerCase().includes('stock') || colDef.header.toLowerCase().includes('moh') ) ) {
          return {
             ...colDef,
-            header: () => <div className="text-right w-full">{colDef.header}</div>,
+            header: () => <div className="text-right w-full">{formatMultiLineHeader(colDef.header as string)}</div>,
+            enableSorting: true,
         };
     }
-    return colDef;
+    if (typeof colDef.header === 'string' && !colDef.header.includes('<br />') && typeof colDef.header !== 'function') {
+        return { ...colDef, header: () => formatMultiLineHeader(colDef.header as string), enableSorting: true };
+    }
+    return { ...colDef, enableSorting: true };
 });
 
 const standardViewColumnAccessors: (keyof MarketingDataEntry)[] = [
@@ -262,42 +315,33 @@ const standardViewColumnAccessors: (keyof MarketingDataEntry)[] = [
   'marketingPercent', 'acosPercent', 'totalGp', 'gpPercent'
 ];
 
-const BATCH_SIZE = 1000;
+const DEFAULT_FROZEN_COLUMN_COUNT = 3;
 
 export default function AdvertisementDetailsPage() {
   const [data, setData] = useState<MarketingDataEntry[]>([]);
   const [pageCount, setPageCount] = useState(0);
   const [totalDBRowCount, setTotalDBRowCount] = useState(0);
-
   const [isLoadingReport, setIsLoadingReport] = useState(true);
-  const [isProcessingFile, setIsProcessingFile] = useState(false);
-  const [uploadProgressMessage, setUploadProgressMessage] = useState<string | null>(null);
-
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
   const [globalFilter, setGlobalFilter] = useState('');
   const [selectedDatePreset, setSelectedDatePreset] = useState<string>('last30days');
   const [dateRange, setDateRange] = useState<CustomDateRange | undefined>(undefined);
-
   const [availableOwners, setAvailableOwners] = useState<string[]>([]);
   const [selectedOwner, setSelectedOwner] = useState<string | undefined>(undefined);
-
   const [availablePortfolios, setAvailablePortfolios] = useState<string[]>([]);
   const [selectedPortfolio, setSelectedPortfolio] = useState<string | undefined>(undefined);
-
   const [currentView, setCurrentView] = useState<'standard' | 'all'>('standard');
-  const [frozenColumnCount, setFrozenColumnCount] = useState(1);
-
   const [sorting, setSorting] = useState<SortingState>([]);
-
   const [{ pageIndex, pageSize }, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 100,
   });
   const [pageInput, setPageInput] = useState<string>(String(pageIndex + 1));
+  const [isMarketingUploadModalOpen, setIsMarketingUploadModalOpen] = useState(false);
+  const [isSummaryDialogOpen, setIsSummaryDialogOpen] = useState(false);
+  const [uploadSummary, setUploadSummary] = useState<ProductListingUploadSummary | null>(null);
+  const [frozenColumnCount, setFrozenColumnCount] = useState(DEFAULT_FROZEN_COLUMN_COUNT);
 
 
   const loadMarketingData = useCallback(async () => {
@@ -306,7 +350,7 @@ export default function AdvertisementDetailsPage() {
       const params: FetchMarketingDataParams = {
         pageIndex,
         pageSize,
-        sorting,
+        sorting: sorting.map(s => ({ ...s, id: toSnakeCaseForSort(s.id) })),
         globalFilter,
         selectedDatePreset,
         customDateRange: selectedDatePreset === 'custom' ? dateRange : undefined,
@@ -368,7 +412,7 @@ export default function AdvertisementDetailsPage() {
     } else {
       currentColumnsToUse = initialColumnsDefinition;
     }
-    return currentColumnsToUse;
+    return currentColumnsToUse.map(col => ({ ...col, enableSorting: true }));
   }, [currentView]);
 
 
@@ -380,6 +424,7 @@ export default function AdvertisementDetailsPage() {
       pagination: { pageIndex, pageSize },
       sorting,
       globalFilter,
+      columnPinning: { left: columns.slice(0, frozenColumnCount).map(c => c.id || (c as any).accessorKey) }
     },
     onPaginationChange: setPagination,
     onSortingChange: setSorting,
@@ -391,8 +436,7 @@ export default function AdvertisementDetailsPage() {
     manualSorting: true,
     manualFiltering: true,
     debugTable: false,
-    getColumnCanFreeze: () => true,
-    getIsColumnFrozen: (column) => column.getIsFrozen() === 'left',
+    enableColumnPinning: true,
   });
 
   const handlePageInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -411,144 +455,6 @@ export default function AdvertisementDetailsPage() {
     }
   };
 
-  const handleUploadButtonClick = () => {
-    if (selectedFile && !isProcessingFile) {
-      handleFileUpload();
-    } else if (!isProcessingFile) {
-      fileInputRef.current?.click();
-    }
-  };
-
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files && event.target.files[0]) {
-      setSelectedFile(event.target.files[0]);
-      setFileName(event.target.files[0].name);
-    } else {
-      setSelectedFile(null);
-      setFileName(null);
-    }
-  };
-
-  const handleFileUpload = async () => {
-    if (!selectedFile) {
-      toast({ title: "No File Selected", description: "Please select an Excel or CSV file to upload.", variant: "destructive" });
-      return;
-    }
-    setIsProcessingFile(true);
-    setUploadProgressMessage("Starting file processing...");
-    let totalSuccessfullyProcessed = 0;
-    const allErrorsEncountered: any[] = [];
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const fileData = e.target?.result;
-        if (!fileData) throw new Error("File content not readable");
-
-        const workbook = XLSX.read(fileData, { type: 'array', cellDates: true });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const jsonData = XLSX.utils.sheet_to_json<any>(worksheet, { header: 1, raw: false, blankrows: false });
-
-        if (jsonData.length < 3) throw new Error("File empty or invalid structure (headers in row 2, data from row 3)");
-
-        const headers: string[] = (jsonData[1] as string[] || []).map(h => String(h || '').trim());
-        const rows = jsonData.slice(2);
-
-        if (!headers || headers.length === 0) throw new Error("Header row not found");
-        if (rows.length === 0) throw new Error("No data rows found");
-
-        const parsedEntries: Omit<MarketingDataEntry, 'id' | 'createdAt'>[] = rows.map((rowArray: any[]) => {
-          const entry: any = {};
-          headers.forEach((header, index) => {
-            const mappedKey = headerMapping[String(header).trim()];
-            if (mappedKey) {
-              let value = rowArray[index];
-              if (value === undefined || value === null || String(value).trim() === '') {
-                entry[mappedKey] = null;
-              } else if (mappedKey === 'date') {
-                entry[mappedKey] = parseExcelDate(value);
-              } else if (numericFields.includes(mappedKey)) {
-                let cleanedValue = String(value).replace(/,/g, '');
-                if (String(cleanedValue).includes('%')) {
-                  cleanedValue = cleanedValue.replace(/%/g, '');
-                  const numVal = parseFloat(cleanedValue);
-                  entry[mappedKey] = isNaN(numVal) ? null : numVal / 100;
-                } else {
-                  cleanedValue = String(cleanedValue).replace(/[^\d.-]+/g, "");
-                  const numVal = parseFloat(cleanedValue);
-                  entry[mappedKey] = isNaN(numVal) ? null : numVal;
-                }
-              } else {
-                entry[mappedKey] = String(value).trim();
-              }
-            }
-          });
-          return entry;
-        }).filter(entry => Object.values(entry).some(val => val !== null && val !== undefined && String(val).trim() !== ''));
-
-        const uniqueEntriesMap = new Map<string, Omit<MarketingDataEntry, 'id' | 'createdAt'>>();
-        parsedEntries.forEach(entry => {
-          if (entry.date && entry.asin) {
-            const key = `${entry.date}-${entry.asin}`;
-            uniqueEntriesMap.set(key, entry);
-          } else {
-            allErrorsEncountered.push({ message: "Skipping entry from deduplication due to missing date or ASIN", entryData: JSON.stringify(entry).substring(0,100) });
-            uniqueEntriesMap.set(Math.random().toString(36).substring(7), entry);
-          }
-        });
-        const deduplicatedEntries = Array.from(uniqueEntriesMap.values());
-        const totalEntriesInFile = deduplicatedEntries.length;
-
-        if (deduplicatedEntries.length === 0) throw new Error("No valid data after deduplication");
-
-        for (let i = 0; i < deduplicatedEntries.length; i += BATCH_SIZE) {
-          const chunk = deduplicatedEntries.slice(i, i + BATCH_SIZE);
-          setUploadProgressMessage(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1} of ${Math.ceil(deduplicatedEntries.length / BATCH_SIZE)}... (${chunk.length} entries)`);
-          const result = await processAndStoreMarketingData(chunk);
-          if (result.success) totalSuccessfullyProcessed += result.count || 0;
-          if (result.errorsEncountered && result.errorsEncountered.length > 0) allErrorsEncountered.push(...result.errorsEncountered);
-          if (!result.success && (!result.errorsEncountered || result.errorsEncountered.length === 0)) {
-             allErrorsEncountered.push({ message: `Batch starting at entry ${i + 1} failed: ${result.message}` });
-          }
-        }
-
-        if (totalSuccessfullyProcessed > 0) toast({ title: "Processing Complete", description: `Successfully processed ${totalSuccessfullyProcessed} of ${totalEntriesInFile} unique marketing data entries (new entries added or existing ones updated based on Date & ASIN).`, duration: 7000 });
-        if (allErrorsEncountered.length > 0) {
-          console.error("Errors during batch processing:", allErrorsEncountered);
-          const sampleError = String(allErrorsEncountered[0]?.message || allErrorsEncountered[0]).substring(0,100);
-          toast({ title: "Processing Issues", description: `${allErrorsEncountered.length} errors occurred. Some data may not have been stored. Check console. Example: ${sampleError}...`, variant: "destructive", duration: 10000 });
-        }
-        if (totalSuccessfullyProcessed === 0 && totalEntriesInFile > 0 && allErrorsEncountered.length > 0) toast({ title: "Upload Failed", description: "No entries were successfully stored. Check errors in console.", variant: "destructive" });
-        else if (totalEntriesInFile === 0 && parsedEntries.length > 0 && allErrorsEncountered.length === 0) toast({ title: "No New Data Processed", description: "No new entries to add. Existing entries might have been updated.", variant: "default" });
-
-        loadMarketingData();
-      } catch (processingError) {
-        console.error("Error during Excel processing:", processingError);
-        toast({ title: "Processing Error", description: processingError instanceof Error ? processingError.message : "An error occurred while processing the file.", variant: "destructive" });
-      } finally {
-        setSelectedFile(null);
-        setFileName(null);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-        setIsProcessingFile(false);
-        setUploadProgressMessage(null);
-      }
-    };
-    reader.onerror = () => {
-      toast({ title: "File Reading Error", description: "An error occurred while trying to read the file.", variant: "destructive" });
-      setIsProcessingFile(false);
-      setUploadProgressMessage(null);
-    };
-    try {
-      reader.readAsArrayBuffer(selectedFile);
-    } catch (readError) {
-        console.error("Error initiating file read:", readError);
-        toast({ title: "File Read Initiation Error", description: readError instanceof Error ? readError.message : String(readError), variant: "destructive" });
-        setIsProcessingFile(false);
-        setUploadProgressMessage(null);
-    }
-  };
-
   const clearCustomDateRange = () => {
     setDateRange(undefined);
     if (selectedDatePreset === 'custom') setSelectedDatePreset('last30days');
@@ -563,10 +469,10 @@ export default function AdvertisementDetailsPage() {
   return (
     <TooltipProvider>
       <div className="flex flex-col h-screen p-2 md:p-3">
-        <div className="pb-2">
-          <h1 className="text-xl font-semibold tracking-tight text-foreground">Advertisement Details</h1>
-        </div>
-
+        <h1 className="text-2xl font-semibold text-foreground mb-4 flex items-center">
+            <FileSpreadsheet className="mr-3 h-7 w-7 text-primary" />
+            Advertisement Details
+        </h1>
         <div className="flex flex-col md:flex-row md:flex-wrap md:items-end gap-3 pb-3 border-b mb-3">
             <div className="relative min-w-[150px] md:min-w-[200px]">
                 <Label htmlFor="adv-global-filter" className="text-xs font-medium text-muted-foreground mb-0.5 block">Global Search</Label>
@@ -627,42 +533,51 @@ export default function AdvertisementDetailsPage() {
                 )}
               </>
             )}
+             <div>
+                <Label htmlFor="freeze-columns-select" className="text-xs font-medium text-muted-foreground mb-0.5 block">Freeze Columns</Label>
+                <Select
+                  value={String(frozenColumnCount)}
+                  onValueChange={(value) => setFrozenColumnCount(Number(value))}
+                >
+                  <SelectTrigger id="freeze-columns-select" className="h-9 text-sm w-full min-w-[100px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="0">No Freeze</SelectItem>
+                    {columns.slice(0, 5).map((col, index) => {
+                      const colDef = col as ColumnDef<MarketingDataEntry, any>;
+                      const header = typeof colDef.header === 'function' ? colDef.header({} as any) : colDef.header;
+                      const headerText = typeof header === 'string' ? header : 
+                                         (colDef.accessorKey as string || colDef.id || `Col ${index + 1}`);
+                      return (
+                        <SelectItem key={colDef.id || (colDef.accessorKey as string) || index} value={String(index + 1)}>
+                           {`${index + 1} Column${index + 1 > 1 ? 's' : ''} (Up to ${headerText.split('<br')[0].trim()})`}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+            </div>
 
             <div className="flex items-end gap-2 md:ml-auto">
-                <div>
-                <Label htmlFor="freeze-columns-select" className="text-xs font-medium text-muted-foreground mb-0.5 block">Freeze Columns</Label>
-                <Select value={String(frozenColumnCount)} onValueChange={(value) => setFrozenColumnCount(Number(value))}>
-                    <SelectTrigger id="freeze-columns-select" className="h-9 text-sm w-full min-w-[100px]">
-                    <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                    {[0, 1, 2, 3].map(num => (
-                        <SelectItem key={num} value={String(num)}>{num} Column{num !== 1 ? 's' : ''}</SelectItem>
-                    ))}
-                    </SelectContent>
-                </Select>
-                </div>
                 <RadioGroup value={currentView} onValueChange={(value: 'standard' | 'all') => setCurrentView(value)} className="flex space-x-1 h-9 items-center">
                     <div className="flex items-center space-x-1"><RadioGroupItem value="standard" id="standard-view" className="h-3.5 w-3.5"/><Label htmlFor="standard-view" className="text-xs font-normal cursor-pointer">Standard</Label></div>
                     <div className="flex items-center space-x-1"><RadioGroupItem value="all" id="all-columns-view" className="h-3.5 w-3.5"/><Label htmlFor="all-columns-view" className="text-xs font-normal cursor-pointer">All</Label></div>
                 </RadioGroup>
-                <Tooltip><TooltipTrigger asChild><Button onClick={loadMarketingData} disabled={isLoadingReport || isProcessingFile} variant="outline" size="icon" className="h-9 w-9"><RefreshCw className={`h-4 w-4 ${isLoadingReport ? 'animate-spin' : ''}`} /></Button></TooltipTrigger><TooltipContent><p>Refresh Data</p></TooltipContent></Tooltip>
+                <Tooltip><TooltipTrigger asChild><Button onClick={loadMarketingData} disabled={isLoadingReport} variant="outline" size="icon" className="h-9 w-9"><RefreshCw className={`h-4 w-4 ${isLoadingReport ? 'animate-spin' : ''}`} /></Button></TooltipTrigger><TooltipContent><p>Refresh Data</p></TooltipContent></Tooltip>
                 <Tooltip>
                     <TooltipTrigger asChild>
-                        <Button onClick={handleUploadButtonClick} disabled={isProcessingFile} variant="outline" size="icon" className="h-9 w-9"><UploadCloud className="h-4 w-4" /></Button>
+                         <Button onClick={() => setIsMarketingUploadModalOpen(true)} variant="outline" size="icon" className="h-9 w-9"><UploadCloud className="h-4 w-4" /></Button>
                     </TooltipTrigger>
-                    <TooltipContent><p>{selectedFile && fileName ? `Process: ${fileName.substring(0, 30)}${fileName.length > 30 ? '...' : ''}` : "Upload Excel"}</p></TooltipContent>
+                    <TooltipContent><p>Upload Excel Sheets</p></TooltipContent>
                 </Tooltip>
             </div>
         </div>
 
-        <Input id="marketing-file-upload-hidden" type="file" ref={fileInputRef} accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel" onChange={handleFileChange} className="hidden" />
-        {uploadProgressMessage && <p className="text-xs text-primary py-0.5">{uploadProgressMessage}</p>}
-
-        <div className="flex-1 flex flex-col min-h-0 mt-1">
-          <ScrollArea className="flex-1 w-full rounded-md border bg-card">
-            <Table className="min-w-[800px] whitespace-nowrap">
-              <TableCaption className="py-1 text-xs text-muted-foreground sticky bottom-0 bg-card z-10">
+         <div className="flex-1 flex flex-col min-h-0 mt-1 overflow-x-hidden">
+          <ScrollArea className="w-full rounded-md border bg-card max-h-[500px]">
+            <Table className={cn("whitespace-nowrap", currentView === 'standard' ? 'min-w-[1500px]' : 'min-w-[2700px]')}>
+              <TableCaption className="py-1 text-xs text-muted-foreground bg-card">
                 {(isLoadingReport && (!data || data.length === 0)) ? ( "Loading marketing data report..."
                 ) : (!isLoadingReport && data && data.length > 0 && (globalFilter || selectedDatePreset !== 'alltime' || selectedOwner || selectedPortfolio || (dateRange && (dateRange.from || dateRange?.to)))) ? (
                   <>Showing {table.getRowModel().rows?.length ?? 0} of {totalDBRowCount ?? 0} matching entries. Page {table.getState().pagination.pageIndex + 1} of {table.getPageCount() || 0}</>
@@ -677,30 +592,41 @@ export default function AdvertisementDetailsPage() {
               <TableHeader>
                 {table.getHeaderGroups().map(headerGroup => (
                   <TableRow key={headerGroup.id}>
-                    {headerGroup.headers.map(header => (
-                      <TableHead
-                        key={header.id}
-                        className={cn(
-                          "sticky top-0 bg-card border-b py-0.5 text-sm whitespace-nowrap",
-                          header.column.getCanSort() ? 'cursor-pointer select-none' : '',
-                          header.index < frozenColumnCount ? "z-30" : "z-20",
-                          header.index === frozenColumnCount - 1 && frozenColumnCount > 0 && "border-r shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)]",
-                          // Check if header text suggests numeric/currency/percentage for right alignment
-                           ( (typeof header.column.columnDef.header === 'string' && ( header.column.columnDef.header.includes('%') || header.column.columnDef.header.toLowerCase().includes('price') || header.column.columnDef.header.toLowerCase().includes('revenue') || header.column.columnDef.header.toLowerCase().includes('spend') || header.column.columnDef.header.toLowerCase().includes('profit') || header.column.columnDef.header.toLowerCase().includes('gp') || header.column.columnDef.header.toLowerCase().includes('qty') || header.column.columnDef.header.toLowerCase().includes('units') || header.column.columnDef.header.toLowerCase().includes('stock') || header.column.columnDef.header.toLowerCase().includes('moh') ) )
-                           || ['totalRevenueExVatCp','totalSalesRevenueExVatSp', 'totalAdvSpend', 'totalAdvSales', 'marketingPercent', 'acosPercent', 'totalGp', 'gpPercent', 'totalQtySold', 'totalAdvUnitsSold', 'fbaStock', 'bwwActualStock', 'vcStock', 'totalStock', 'moh', 'perUnitAdvSpendOnTotalQtySold', 'perUnitAdvSpendOnAdvQtySold', 'zeroAdvProfitSc', 'zeroAdvProfitVc', 'totalZeroAdvGrossProfit'].includes(header.column.id)
-                           ) ? 'text-right pr-2 pl-1' : 'text-left pl-2 pr-1'
-                        )}
-                        style={{
-                          width: header.getSize(),
-                          minWidth: header.getSize(),
-                          left: header.index < frozenColumnCount ? header.getStart('css') : undefined,
-                         }}
-                        onClick={header.column.getToggleSortingHandler()}
-                      >
-                        {header.isPlaceholder ? null : flexRender( header.column.columnDef.header, header.getContext() )}
-                        {{ asc: ' \u2191', desc: ' \u2193',}[(header.column.getIsSorted() as string) ?? '']}
-                      </TableHead>
-                    ))}
+                    {headerGroup.headers.map((header, headerIdx) => {
+                      const isFrozen = headerIdx < frozenColumnCount;
+                      let leftPositionStyle = {};
+                       if (isFrozen) {
+                        leftPositionStyle = { left: `${header.getStart()}px` };
+                      }
+                      const zIndex = isFrozen ? 30 - headerIdx : 10;
+
+
+                      return (
+                        <TableHead
+                          key={header.id}
+                          className={cn(
+                            "sticky top-0 bg-card border-b py-2 text-sm whitespace-nowrap",
+                            header.column.getCanSort() ? 'cursor-pointer select-none' : '',
+                            isFrozen && (header.index % 2 === 0 ? 'bg-slate-100 dark:bg-slate-800' : 'bg-card'),
+                            isFrozen && 'group-hover:bg-muted', 
+                            isFrozen && headerIdx === frozenColumnCount - 1 && "shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] dark:shadow-[2px_0_4px_-2px_rgba(255,255,255,0.05)]",
+                            ( (typeof header.column.columnDef.header === 'string' && ( header.column.columnDef.header.includes('%') || header.column.columnDef.header.toLowerCase().includes('price') || header.column.columnDef.header.toLowerCase().includes('revenue') || header.column.columnDef.header.toLowerCase().includes('spend') || header.column.columnDef.header.toLowerCase().includes('profit') || header.column.columnDef.header.toLowerCase().includes('gp') || header.column.columnDef.header.toLowerCase().includes('qty') || header.column.columnDef.header.toLowerCase().includes('units') || header.column.columnDef.header.toLowerCase().includes('stock') || header.column.columnDef.header.toLowerCase().includes('moh') ) )
+                             || ['totalRevenueExVatCp','totalSalesRevenueExVatSp', 'totalAdvSpend', 'totalAdvSales', 'marketingPercent', 'acosPercent', 'totalGp', 'gpPercent', 'totalQtySold', 'totalAdvUnitsSold', 'fbaStock', 'bwwActualStock', 'vcStock', 'totalStock', 'moh', 'perUnitAdvSpendOnTotalQtySold', 'perUnitAdvSpendOnAdvQtySold', 'zeroAdvProfitSc', 'zeroAdvProfitVc', 'totalZeroAdvGrossProfit'].includes(header.column.id)
+                             ) ? 'text-right pr-2 pl-1' : 'text-left pl-2 pr-1'
+                          )}
+                          style={{
+                            ...leftPositionStyle,
+                            width: header.getSize(),
+                            minWidth: header.getSize(),
+                            zIndex: zIndex
+                           }}
+                          onClick={header.column.getToggleSortingHandler()}
+                        >
+                          {header.isPlaceholder ? null : flexRender( header.column.columnDef.header, header.getContext() )}
+                          {{ asc: ' ↑', desc: ' ↓',}[(header.column.getIsSorted() as string) ?? '']}
+                        </TableHead>
+                      );
+                    })}
                   </TableRow>
                 ))}
               </TableHeader>
@@ -713,33 +639,58 @@ export default function AdvertisementDetailsPage() {
                   <TableRow><TableCell colSpan={columns.length} className="h-24 text-center whitespace-nowrap">No marketing data found. Upload a file to see the report.</TableCell></TableRow>
                 ) : (
                   table.getRowModel().rows.map(row => (
-                    <TableRow key={row.id} data-state={row.getIsSelected() && "selected"} className="group">
-                      {row.getVisibleCells().map(cell => (
-                        <TableCell
-                          key={cell.id}
-                          className={cn(
-                            "py-0.5 text-sm whitespace-nowrap group-hover:bg-muted/50 border-b",
-                            cell.column.getIndex() < frozenColumnCount ? "sticky bg-card group-hover:bg-muted/60 z-10" : "",
-                            cell.column.getIndex() === frozenColumnCount - 1 && frozenColumnCount > 0 && "border-r shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)]",
-                            // Apply text-right for specific column IDs that are numeric/currency/percentage
-                            ['totalRevenueExVatCp','totalSalesRevenueExVatSp', 'totalAdvSpend', 'totalAdvSales', 'marketingPercent', 'acosPercent', 'totalGp', 'gpPercent', 'totalQtySold', 'totalAdvUnitsSold', 'fbaStock', 'bwwActualStock', 'vcStock', 'totalStock', 'moh', 'perUnitAdvSpendOnTotalQtySold', 'perUnitAdvSpendOnAdvQtySold', 'zeroAdvProfitSc', 'zeroAdvProfitVc', 'totalZeroAdvGrossProfit'].includes(cell.column.id) ? 'text-right pr-2 pl-1' : 'text-left pl-2 pr-1'
-                          )}
-                          style={{
-                            width: cell.column.getSize(),
-                            minWidth: cell.column.getSize(),
-                            left: cell.column.getIndex() < frozenColumnCount ? cell.column.getStart('css') : undefined,
-                           }}
-                        >
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </TableCell>
-                      ))}
+                    <TableRow 
+                      key={row.id} 
+                      data-state={row.getIsSelected() && "selected"} 
+                      className={cn(
+                        "group",
+                        row.index % 2 === 0 ? "bg-slate-100 dark:bg-slate-800" : "bg-card"
+                      )}
+                    >
+                      {row.getVisibleCells().map((cell, cellIdx) => {
+                        const isFrozen = cellIdx < frozenColumnCount;
+                        let leftPositionStyle = {};
+                         if (isFrozen) {
+                            leftPositionStyle = { left: `${cell.column.getStart()}px` };
+                        }
+                        const zIndex = isFrozen ? 20 - cellIdx : 1;
+
+                        
+                        let cellBgClass = row.index % 2 === 0 ? "bg-slate-100 dark:bg-slate-800" : "bg-card";
+                        if (isFrozen) {
+                           cellBgClass = `group-hover:brightness-95 dark:group-hover:brightness-110 ${cellBgClass}`;
+                        } else {
+                           cellBgClass = `${cellBgClass} group-hover:bg-muted/50`;
+                        }
+
+                        return (
+                          <TableCell
+                            key={cell.id}
+                            className={cn(
+                              "py-2 text-sm whitespace-nowrap border-b", 
+                              isFrozen ? "sticky" : "",
+                              cellBgClass, 
+                              isFrozen && cellIdx === frozenColumnCount - 1 && "shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] dark:shadow-[2px_0_4px_-2px_rgba(255,255,255,0.05)]",
+                              ['totalRevenueExVatCp','totalSalesRevenueExVatSp', 'totalAdvSpend', 'totalAdvSales', 'marketingPercent', 'acosPercent', 'totalGp', 'gpPercent', 'totalQtySold', 'totalAdvUnitsSold', 'fbaStock', 'bwwActualStock', 'vcStock', 'totalStock', 'moh', 'perUnitAdvSpendOnTotalQtySold', 'perUnitAdvSpendOnAdvQtySold', 'zeroAdvProfitSc', 'zeroAdvProfitVc', 'totalZeroAdvGrossProfit'].includes(cell.column.id) ? 'text-right pr-2 pl-1' : 'text-left pl-2 pr-1'
+                            )}
+                            style={{
+                              ...leftPositionStyle,
+                              width: cell.column.getSize(),
+                              minWidth: cell.column.getSize(),
+                              zIndex: zIndex
+                             }}
+                          >
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </TableCell>
+                        );
+                      })}
                     </TableRow>
                   ))
                 )}
               </TableBody>
             </Table>
-            <ScrollBar orientation="horizontal" className="h-2.5 [&>div]:bg-neutral-300 dark:[&>div]:bg-neutral-700 [&>div]:rounded-sm" />
-            <ScrollBar orientation="vertical" className="w-2.5 [&>div]:bg-neutral-300 dark:[&>div]:bg-neutral-700 [&>div]:rounded-sm" />
+             <ScrollBar orientation="horizontal" className="h-2 p-0" />
+             <ScrollBar orientation="vertical" />
           </ScrollArea>
           {pageCount > 0 && (
             <div className="flex items-center justify-end space-x-2 py-1 px-2 border-t bg-card">
@@ -761,6 +712,67 @@ export default function AdvertisementDetailsPage() {
           )}
         </div>
       </div>
+      <MarketingUploadModal
+        isOpen={isMarketingUploadModalOpen}
+        onOpenChange={setIsMarketingUploadModalOpen}
+        onUploadComplete={(summary) => {
+          loadMarketingData();
+          setUploadSummary(summary);
+          setIsSummaryDialogOpen(true);
+        }}
+      />
+      <Dialog open={isSummaryDialogOpen} onOpenChange={setIsSummaryDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Upload Summary</DialogTitle>
+            <DialogDescription>
+              {uploadSummary ? (
+                <>
+                  File: <strong>{uploadSummary.fileName || 'N/A'}</strong><br/>
+                  Total rows found: {uploadSummary.totalRowsProcessed}.
+                  Successfully processed: {uploadSummary.processedCount || 0}.
+                  Rejected: {uploadSummary.errorsEncountered.length}.
+                </>
+              ) : 'Processing complete.'}
+            </DialogDescription>
+          </DialogHeader>
+          {uploadSummary && uploadSummary.errorsEncountered.length > 0 && (
+            <div className="mt-4">
+              <h4 className="font-semibold mb-2">Rejection Details:</h4>
+              <ScrollArea className="h-40 border rounded-md">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Row #</TableHead>
+                      <TableHead>Reason</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {uploadSummary.errorsEncountered.map((err, index) => (
+                      <TableRow key={index}>
+                        <TableCell>{err.rowIndexInExcel || 'N/A'}</TableCell>
+                        <TableCell>{err.error}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+              <Button
+                onClick={() => downloadErrorCSV(uploadSummary.errorsEncountered, 'brandAnalytics')}
+                variant="link"
+                size="sm"
+                className="mt-2 text-sm"
+              >
+                <Download className="mr-2 h-4 w-4" />
+                Download Error Report
+              </Button>
+            </div>
+          )}
+          <DialogFooter>
+            <Button onClick={() => setIsSummaryDialogOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </TooltipProvider>
   );
 }

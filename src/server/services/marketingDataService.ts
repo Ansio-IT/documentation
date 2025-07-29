@@ -1,6 +1,6 @@
 
 import { type SupabaseClient } from '@supabase/supabase-js';
-import type { MarketingDataEntry, FetchMarketingDataParams } from '@/lib/types';
+import type { MarketingDataEntry, FetchMarketingDataParams, SortingState as ClientSortingState } from '@/lib/types'; // Assuming SortingState might be different from Supabase's expectation if not careful
 import { cookies } from 'next/headers';
 import { createClient } from '@/lib/supabase/server';
 import { subDays, formatISO } from 'date-fns';
@@ -76,6 +76,12 @@ const fromSnakeCase = (dbEntry: any): MarketingDataEntry => {
   };
 };
 
+const getDbSortColumn = (clientSortId: string): string => {
+  const tempObjForConversion = { [clientSortId]: '' };
+  const snakedTempObj = toSnakeCase(tempObjForConversion as Partial<MarketingDataEntry>);
+  const dbColumnName = Object.keys(snakedTempObj)[0];
+  return dbColumnName || clientSortId; 
+};
 
 class MarketingDataService {
   private getSupabaseClient(): SupabaseClient {
@@ -90,18 +96,23 @@ class MarketingDataService {
     }
 
     const dataToUpsert = entries.map(entry => toSnakeCase(entry));
+    // console.log('[MarketingDataService] Data being upserted to marketing_data table:', JSON.stringify(dataToUpsert, null, 2));
     
-    const { data, error, count } = await supabase
+    const { data: upsertedData, error } = await supabase
       .from('marketing_data')
-      .upsert(dataToUpsert, { onConflict: 'date,asin' }) 
-      .select(); 
+      .upsert(dataToUpsert, { onConflict: 'date,asin' })
+      .select(); // Add .select()
 
     if (error) {
       console.error("Error upserting marketing data in bulk to Supabase:", error);
+      // console.log('[MarketingDataService] Failed upsert payload for marketing_data:', JSON.stringify(dataToUpsert, null, 2));
       return { success: false, count: 0, errorsEncountered: [error] };
     }
     
-    return { success: true, count: count || 0, errorsEncountered: [] };
+    // console.log('[MarketingDataService] Upserted marketing data returned from Supabase:', JSON.stringify(upsertedData, null, 2));
+    const processedCount = upsertedData ? upsertedData.length : 0;
+    
+    return { success: true, count: processedCount, errorsEncountered: [] };
   }
 
   async getAllMarketingData(options: FetchMarketingDataParams): Promise<{ data: MarketingDataEntry[]; pageCount: number; totalCount: number }> {
@@ -114,12 +125,18 @@ class MarketingDataService {
         selectedDatePreset,
         customDateRange,
         selectedOwner,
-        selectedPortfolio 
+        selectedPortfolio,
+        productCode 
     } = options;
 
     let query = supabase
       .from('marketing_data')
       .select('*', { count: 'exact' });
+
+    // Product Code Filter (for product-specific page)
+    if (productCode) {
+      query = query.eq('product_code', productCode);
+    }
 
     // Date Filtering
     let fromDate: string | undefined;
@@ -130,7 +147,7 @@ class MarketingDataService {
       if (customDateRange.from) fromDate = formatISO(customDateRange.from, { representation: 'date' });
       if (customDateRange.to) toDate = formatISO(customDateRange.to, { representation: 'date' });
     } else if (selectedDatePreset === 'last7days') {
-      fromDate = formatISO(subDays(today, 6), { representation: 'date' }); // 6 days ago to include today
+      fromDate = formatISO(subDays(today, 6), { representation: 'date' }); 
       toDate = formatISO(today, { representation: 'date' });
     } else if (selectedDatePreset === 'last30days') {
       fromDate = formatISO(subDays(today, 29), { representation: 'date' });
@@ -139,7 +156,7 @@ class MarketingDataService {
       fromDate = formatISO(subDays(today, 89), { representation: 'date' });
       toDate = formatISO(today, { representation: 'date' });
     }
-    // If a preset implies 'all time' or is undefined, no date filter is applied unless custom is set
+    
 
     if (fromDate) {
       query = query.gte('date', fromDate);
@@ -164,19 +181,32 @@ class MarketingDataService {
         'asin', 'product_code', 'product_description', 'person', 
         'portfolio', 'sub_portfolio', 'adv_marketplace'
       ];
-      const orFilterString = filterColumns.map(col => `${col}.ilike.%${globalFilter}%`).join(',');
-      query = query.or(orFilterString);
+      // Also try to filter numeric columns if globalFilter is a number
+      const numericGlobalFilter = parseFloat(globalFilter);
+      let numericOrFilterString = '';
+      if (!isNaN(numericGlobalFilter)) {
+        const numericDbColsForSearch = [ // A subset of numeric columns suitable for direct numeric search
+          'total_qty_sold', 'total_adv_units_sold', 'total_revenue_ex_vat_cp', 'total_sales_revenue_ex_vat_sp', 
+          'total_adv_spend', 'total_adv_sales', 'fba_stock', 'bww_actual_stock', 'vc_stock', 'total_stock'
+        ];
+        numericOrFilterString = numericDbColsForSearch.map(col => `${col}.eq.${numericGlobalFilter}`).join(',');
+      }
+
+      const textOrFilterString = filterColumns.map(col => `${col}.ilike.%${globalFilter}%`).join(',');
+      const finalOrFilter = numericOrFilterString ? `${textOrFilterString},${numericOrFilterString}` : textOrFilterString;
+      query = query.or(finalOrFilter);
     }
 
     // Apply sorting
     if (sorting && sorting.length > 0) {
       sorting.forEach(sort => {
-        const dbColumnName = toSnakeCase({ [sort.id]: '' } as Partial<MarketingDataEntry>)[sort.id] || sort.id;
-        query = query.order(dbColumnName, { ascending: !sort.desc });
+        const dbColumnName = getDbSortColumn(sort.id);
+        query = query.order(dbColumnName, { ascending: !sort.desc, nullsLast: true });
       });
     } else {
       // Default sort
-      query = query.order('date', { ascending: false }).order('created_at', { ascending: false });
+      query = query.order('date', { ascending: false, nullsLast: true })
+                   .order('created_at', { ascending: false, nullsLast: true });
     }
 
     // Apply pagination
@@ -203,11 +233,15 @@ class MarketingDataService {
 
   async getDistinctMarketingFieldValues(fieldName: 'person' | 'portfolio'): Promise<string[]> {
     const supabase = this.getSupabaseClient();
+    
+    let dbFieldName = fieldName;
+    if (fieldName === 'person') dbFieldName = 'person'; 
+    if (fieldName === 'portfolio') dbFieldName = 'portfolio'; 
+
     const { data, error } = await supabase
       .from('marketing_data')
-      .select(fieldName, { count: 'exact' }); // We need to fetch all and deduplicate client-side or use RPC
-      // Supabase select distinct is a bit tricky, might need an RPC or process client-side
-      // For simplicity, fetching all and processing
+      .select(dbFieldName); 
+      
 
     if (error) {
       console.error(`Error fetching distinct ${fieldName} values:`, error);
@@ -216,7 +250,7 @@ class MarketingDataService {
 
     if (!data) return [];
 
-    const distinctValues = Array.from(new Set(data.map(item => item[fieldName]).filter(Boolean) as string[]));
+    const distinctValues = Array.from(new Set(data.map(item => item[dbFieldName]).filter(Boolean) as string[]));
     return distinctValues.sort();
   }
 }

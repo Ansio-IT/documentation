@@ -9,6 +9,9 @@ import { Button } from '@/components/ui/button';
 import { X as RemoveIcon, Loader2, Search } from 'lucide-react';
 import { searchAssociatedProductsAction } from '@/app/actions';
 import { cn } from '@/lib/utils';
+import { productsService } from '@/server/services/products';
+import { fetchProductByIdAction } from '@/app/actions/product.actions';
+
 
 interface SearchResult {
   id: string;
@@ -17,24 +20,47 @@ interface SearchResult {
 }
 
 interface SearchableMultiSelectSkuProps {
-  value: string[]; // Array of selected product codes (SKUs)
+  value: string[]; // Array of selected product IDs
   onChange: (newValue: string[]) => void;
   placeholder?: string;
-  currentProductId?: string; // To exclude the current product from search results
+  currentProductId?: string;
 }
 
 export function SearchableMultiSelectSku({
-  value: selectedProductCodes,
+  value: selectedProductIds,
   onChange,
-  placeholder = "Search and select SKUs...",
+  placeholder = "Search and select products...",
   currentProductId,
 }: SearchableMultiSelectSkuProps) {
   const [inputValue, setInputValue] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [selectedProductDetails, setSelectedProductDetails] = useState<Map<string, SearchResult>>(new Map());
   const [isLoading, setIsLoading] = useState(false);
   const [isPopoverOpen, setIsPopoverOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const fetchSelectedDetails = async () => {
+        const newDetails = new Map(selectedProductDetails);
+        let changed = false;
+        for (const id of selectedProductIds) {
+            if (!newDetails.has(id)) {
+                const product = await fetchProductByIdAction(id);
+                if (product) {
+                    newDetails.set(id, { id: product.id, productCode: product.productCode, name: product.name || null });
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            setSelectedProductDetails(newDetails);
+        }
+    };
+    if (selectedProductIds.length > 0) {
+        fetchSelectedDetails();
+    }
+  }, [selectedProductIds]);
 
   const debouncedSearch = useCallback(
     debounce(async (searchTerm: string) => {
@@ -46,32 +72,37 @@ export function SearchableMultiSelectSku({
       setIsLoading(true);
       try {
         const results = await searchAssociatedProductsAction(searchTerm, currentProductId);
-        setSearchResults(results.filter(r => !selectedProductCodes.includes(r.productCode)));
+        setSearchResults(results.filter(r => !selectedProductIds.includes(r.id)));
       } catch (error) {
         console.error("Failed to search products:", error);
         setSearchResults([]);
       }
       setIsLoading(false);
     }, 300),
-    [selectedProductCodes, currentProductId]
+    [selectedProductIds, currentProductId]
   );
 
   useEffect(() => {
     debouncedSearch(inputValue);
   }, [inputValue, debouncedSearch]);
 
-  const handleSelect = (productCode: string) => {
-    if (!selectedProductCodes.includes(productCode)) {
-      onChange([...selectedProductCodes, productCode]);
+  const handleSelect = (product: SearchResult) => {
+    if (!selectedProductIds.includes(product.id)) {
+      onChange([...selectedProductIds, product.id]);
+      const newDetails = new Map(selectedProductDetails);
+      newDetails.set(product.id, product);
+      setSelectedProductDetails(newDetails);
     }
     setInputValue('');
     setSearchResults([]);
-    // setIsPopoverOpen(false); // Optionally close popover on select
     inputRef.current?.focus();
   };
 
-  const handleRemove = (productCodeToRemove: string) => {
-    onChange(selectedProductCodes.filter(pc => pc !== productCodeToRemove));
+  const handleRemove = (productIdToRemove: string) => {
+    onChange(selectedProductIds.filter(id => id !== productIdToRemove));
+    const newDetails = new Map(selectedProductDetails);
+    newDetails.delete(productIdToRemove);
+    setSelectedProductDetails(newDetails);
   };
   
   const handleInputFocus = () => {
@@ -79,13 +110,14 @@ export function SearchableMultiSelectSku({
   };
 
   const handleInputBlur = () => {
-    // Delay closing to allow click on popover items
     setTimeout(() => {
        if (!inputRef.current?.contains(document.activeElement) && !document.querySelector('[data-radix-popper-content-wrapper]')?.contains(document.activeElement) ) {
          setIsPopoverOpen(false);
        }
     }, 150);
   };
+  
+  const displayBadges = selectedProductIds.map(id => selectedProductDetails.get(id)).filter(Boolean) as SearchResult[];
 
   return (
     <Popover open={isPopoverOpen} onOpenChange={setIsPopoverOpen}>
@@ -98,27 +130,27 @@ export function SearchableMultiSelectSku({
           onClick={() => setIsPopoverOpen(!isPopoverOpen)}
         >
           <div className="flex flex-wrap gap-1 items-center flex-grow">
-            {selectedProductCodes.length > 0 ? (
-              selectedProductCodes.map(pc => (
+            {displayBadges.length > 0 ? (
+              displayBadges.map(p => (
                 <Badge
-                  key={pc}
+                  key={p.id}
                   variant="secondary"
                   className="py-0.5 px-2 flex items-center gap-1"
                 >
-                  {pc}
+                  {p.productCode}
                   <span
                     role="button"
                     tabIndex={0}
-                    aria-label={`Remove ${pc}`}
+                    aria-label={`Remove ${p.productCode}`}
                     onClick={(e) => {
-                      e.stopPropagation(); // Prevent popover from closing
-                      handleRemove(pc);
+                      e.stopPropagation();
+                      handleRemove(p.id);
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
                         e.stopPropagation();
-                        handleRemove(pc);
+                        handleRemove(p.id);
                       }
                     }}
                     className="rounded-full hover:bg-muted-foreground/20 p-0.5 focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer"
@@ -138,7 +170,7 @@ export function SearchableMultiSelectSku({
         className="w-[--radix-popover-trigger-width] p-0" 
         side="bottom" 
         align="start"
-        onOpenAutoFocus={(e) => e.preventDefault()} // Prevent auto-focusing first item
+        onOpenAutoFocus={(e) => e.preventDefault()}
       >
         <Command shouldFilter={false}>
           <CommandInput
@@ -158,15 +190,15 @@ export function SearchableMultiSelectSku({
               </div>
             )}
             {!isLoading && inputValue.trim().length > 1 && searchResults.length === 0 && (
-              <CommandEmpty>No matching SKUs found.</CommandEmpty>
+              <CommandEmpty>No matching products found.</CommandEmpty>
             )}
             {!isLoading && searchResults.length > 0 && (
               <CommandGroup heading="Suggestions">
                 {searchResults.map(product => (
                   <CommandItem
                     key={product.id}
-                    value={`${product.productCode} - ${product.name}`} // Value used for filtering if Command `shouldFilter` was true
-                    onSelect={() => handleSelect(product.productCode)}
+                    value={`${product.productCode} - ${product.name}`}
+                    onSelect={() => handleSelect(product)}
                     className="cursor-pointer text-sm"
                   >
                     <div className="flex flex-col">

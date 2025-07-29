@@ -17,7 +17,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableCaption } from "@/components/ui/table";
@@ -29,13 +28,7 @@ import { fetchDepletionDataForProductAction, saveDepletionDataForProductAction }
 import { SearchableMultiSelectSku } from '@/components/ui/searchable-multi-select-sku';
 
 const depletionCoreFormSchema = z.object({
-  associatedProducts: z.preprocess(
-    (val) => (val === undefined || val === null || (typeof val === 'string' && val.trim() === '')) ? [] : val,
-    z.union([
-        z.string().transform(val => val.split(',').map(s => s.trim()).filter(Boolean)),
-        z.array(z.string()).transform(arr => arr.map(s => String(s).trim()).filter(Boolean))
-    ]).default([])
-  ),
+  associatedProducts: z.array(z.string()).default([]),
   localWarehouseLeadTime: z.coerce.number().int().nonnegative().default(14),
   reorderLeadTime: z.coerce.number().int().nonnegative().default(100),
 });
@@ -253,7 +246,7 @@ export function DepletionReportConfigModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => { if (!isSubmitting) onOpenChange(open); }}>
-      <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col bg-card shadow-xl rounded-lg">
+      <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col bg-card shadow-xl rounded-lg overflow-y-hidden">
         <DialogHeader>
           <DialogTitle>Configure Depletion Report for {productName || `Product ID: ${productId}`}</DialogTitle>
           <DialogDescription>Set inventory logistics and daily sales forecasts for this product.</DialogDescription>
@@ -261,12 +254,12 @@ export function DepletionReportConfigModal({
         {isLoading ? (
             <div className="flex-1 flex items-center justify-center p-6">Loading settings...</div>
         ) : (
-        <ScrollArea className="flex-1 min-h-0 pr-6">
-          <form onSubmit={handleSubmit(onCoreSubmit)} id={formId} className="space-y-6 py-4">
+        <div className="flex-1 min-h-0 overflow-y-auto py-4 pr-6">
+          <form onSubmit={handleSubmit(onCoreSubmit)} id={formId} className="space-y-6">
             <section className="space-y-4">
               <h3 className="text-lg font-semibold border-b pb-2">Inventory & Logistics</h3>
               <div>
-                <Label htmlFor="associatedProducts">Associated Products (SKUs)</Label>
+                <Label htmlFor="associatedProducts">Associated Products (by ID)</Label>
                 <Controller
                   name="associatedProducts"
                   control={control}
@@ -274,7 +267,7 @@ export function DepletionReportConfigModal({
                     <SearchableMultiSelectSku
                       value={field.value || []}
                       onChange={field.onChange}
-                      placeholder="Search and select associated SKUs"
+                      placeholder="Search and select associated products..."
                       currentProductId={productId}
                     />
                   )}
@@ -414,9 +407,9 @@ export function DepletionReportConfigModal({
               )}
             </section>
           </form>
-        </ScrollArea>
+        </div>
         )}
-        <DialogFooter className="pt-4 border-t mt-auto">
+        <DialogFooter className="pt-4 border-t">
           <Button variant="outline" type="button" onClick={() => onOpenChange(false)} disabled={isSubmitting || isLoading}>
             Cancel
           </Button>

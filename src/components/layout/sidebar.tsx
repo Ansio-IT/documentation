@@ -1,7 +1,6 @@
-
 "use client";
 
-import React, { useState, useEffect } from 'react'; // Added useEffect
+import * as React from 'react';
 import Link from 'next/link';
 import { Button } from "@/components/ui/button";
 import {
@@ -20,13 +19,13 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { Menu, LayoutDashboard, Settings, Store, Users, FileSpreadsheet } from "lucide-react";
+import { Menu, LayoutDashboard, Settings, Store, Users, FileSpreadsheet, ClipboardList, BarChart3, KeyRound } from "lucide-react";
 
 export function AppSidebar() {
-  const [isOpen, setIsOpen] = useState(false);
-  const [hasMounted, setHasMounted] = useState(false);
+  const [isOpen, setIsOpen] = React.useState(false);
+  const [hasMounted, setHasMounted] = React.useState(false);
 
-  useEffect(() => {
+  React.useEffect(() => {
     setHasMounted(true);
   }, []);
 
@@ -64,6 +63,20 @@ export function AppSidebar() {
           </Button>
 
           <Button asChild variant="ghost" className="w-full justify-start text-sm">
+            <Link href="/depletion" onClick={handleLinkClick}>
+              <ClipboardList className="mr-2 h-4 w-4" />
+              Depletion Report
+            </Link>
+          </Button>
+
+          <Button asChild variant="ghost" className="w-full justify-start text-sm">
+            <Link href="/brand-analytics" onClick={handleLinkClick}>
+                <BarChart3 className="mr-2 h-4 w-4" />
+                Brand Analytics &amp; SOV% Report
+            </Link>
+          </Button>
+
+          <Button asChild variant="ghost" className="w-full justify-start text-sm">
             <Link href="/settings/advertisement-details" onClick={handleLinkClick}>
               <FileSpreadsheet className="mr-2 h-4 w-4" />
               Advertisement Details
@@ -79,6 +92,12 @@ export function AppSidebar() {
                 </div>
               </AccordionTrigger>
               <AccordionContent className="pl-4 pt-1 pb-0">
+                 <Button asChild variant="ghost" className="w-full justify-start text-sm font-normal h-9">
+                   <Link href="/settings/keyword-master" onClick={handleLinkClick}>
+                    <KeyRound className="mr-2 h-4 w-4 text-muted-foreground" />
+                    Keyword Master
+                  </Link>
+                </Button>
                 <Button asChild variant="ghost" className="w-full justify-start text-sm font-normal h-9">
                    <Link href="/settings/market-master" onClick={handleLinkClick}>
                     <Store className="mr-2 h-4 w-4 text-muted-foreground" />

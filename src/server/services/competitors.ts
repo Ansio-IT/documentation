@@ -1,4 +1,2 @@
-
-// This file will be removed as competitor logic is merged into productListingService.ts
-// For now, I'm providing an empty file to signify its removal in the XML changes.
-// If you want to keep it for some transitional reason, let me know.
+// This file is obsolete. Competitor logic is now part of productListingService.ts
+// where `is_competitor = true`. This file can be safely removed.

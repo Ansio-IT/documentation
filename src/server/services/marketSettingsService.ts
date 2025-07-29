@@ -77,6 +77,22 @@ class MarketSettingsService {
     return data ? fromSnakeCase(data) : null;
   }
 
+  async getMarketByName(marketName: string): Promise<MarketSetting | null> {
+    if (!marketName || marketName.trim() === '') return null;
+    const supabase = this.getSupabaseClient();
+    const { data, error } = await supabase
+      .from('markets')
+      .select('*')
+      .eq('market_name', marketName)
+      .maybeSingle(); 
+
+    if (error && error.code !== 'PGRST116') {
+      console.error(`Error fetching market by name "${marketName}":`, error);
+      throw error;
+    }
+    return data ? fromSnakeCase(data) : null;
+  }
+
 
   async addMarketSetting(settingData: Omit<MarketSetting, 'id' | 'createdOn' | 'modifiedOn'>): Promise<MarketSetting> {
     const supabase = this.getSupabaseClient();
