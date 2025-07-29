@@ -1,7 +1,7 @@
 import express, { Request, Response } from "express";
 
 const app = express();
-const port = 5000;
+const port = 8000;
 
 app.get("/api/health", (req: Request, res: Response) => {
   res.json({ status: "OK", timestamp: new Date() });
